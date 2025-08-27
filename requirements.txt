@@ -1,0 +1,5 @@
+pyyaml
+tqdm
+pymupdf
+pandas
+pyqt6

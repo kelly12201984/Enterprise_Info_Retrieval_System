@@ -1,0 +1,22 @@
+# Python
+__pycache__/
+*.pyc
+.venv/
+
+# Local config
+config.yaml
+
+# SQLite db + journals
+tankfinder.db*
+*.db
+*.db-shm
+*.db-wal
+
+# Logs and results
+logs/
+*.log
+
+# OS/Editor
+.vscode/
+.DS_Store
+Thumbs.db
