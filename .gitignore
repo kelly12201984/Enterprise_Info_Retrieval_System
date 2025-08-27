@@ -1,22 +1,59 @@
-# Python
+# ===== Python =====
 __pycache__/
 *.pyc
+*.pyo
+*.pyd
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+.tox/
+.nox/
+.coverage
+htmlcov/
+.ipynb_checkpoints/
+
+# Local virtual envs
 .venv/
+venv/
+.env
+.env.*
+.envrc
 
-# Local config
-config.yaml
+# ===== Build/distribution =====
+build/
+dist/
+*.egg-info/
 
-# SQLite db + journals
+# ===== Editors/OS =====
+.vscode/
+.idea/
+*.code-workspace
+.DS_Store
+Thumbs.db
+Desktop.ini
+
+# ===== Project secrets/config =====
+config.yaml           # keep config.sample.yaml in repo
+
+# ===== SQLite DB & journals =====
 tankfinder.db*
 *.db
 *.db-shm
 *.db-wal
+*.sqlite
+*.sqlite3
 
-# Logs and results
+# ===== Logs & generated outputs =====
 logs/
 *.log
+SQL_results/          # your saved query outputs
+previous_scripts/     # you asked to ignore this folder
 
-# OS/Editor
-.vscode/
-.DS_Store
-Thumbs.db
+# ===== Temp/backup noise =====
+*.tmp
+*.bak
+*.old
+*.orig
+*.swp
+*.swo
+~$*
