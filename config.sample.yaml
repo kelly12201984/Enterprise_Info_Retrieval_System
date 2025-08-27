@@ -1,0 +1,76 @@
+# ===================== TankFinder sample config =====================
+# Copy this file to `config.yaml` and adjust paths/ranges for your environment.
+# Keep `config.yaml` OUT of git (it's in .gitignore).
+
+# ---- Primary roots (existing jobs/archive trees) ----
+roots:
+  - "P:\\JOBS"
+  - "P:\\ARCHIVES\\OLD JOBS"
+
+# ---- QUOTES root (treated as QYYYY jobs by year) ----
+quotes_roots:
+  - "P:\\QUOTES"
+
+# Only index QUOTES years that matter to Chris
+quotes_scan:
+  year_min: 2022
+  year_max: 2100
+
+# ---- Scanner policy for JOBS/ARCHIVES ----
+scan_policy:
+  only_year_dirs_under_roots: true
+  year_dir_regex: "^(19|20)\\d{2}$"   # folders like 2015, 2016, ...
+  year_min: 2015
+  year_max: 2025
+
+# ---- How to detect a job id in JOBS/ARCHIVES paths ----
+job_id_regex: "(?P<job>\\b\\d{3}-\\d{2}\\b)"   # e.g., 101-23
+
+# ---- PDF text extraction (FTS body text) ----
+pdf_text:
+  enabled: true
+  # If you want MAX recall everywhere, omit path_allow_tokens.
+  # If you want to limit where PDF text is parsed, uncomment and edit:
+  # path_allow_tokens: ["quotes", "tr", "calc", "calcs", "compress", "ame", "design", "spec"]
+  max_pages: 10
+  max_chars: 40000
+
+# ---- Office/text extraction (FTS body text) ----
+office_text:
+  enabled: true
+  include: ["docx","xlsx","pptx","csv","txt","md","xml","html","log"]
+  xlsx_sheet_limit: 3
+  xlsx_cells_limit: 400
+  csv_max_lines: 200
+  max_chars: 40000
+
+# ---- File-type detectors (badges/counters) ----
+detectors:
+  compress:
+    ext_any: [".cw7", ".xml"]
+    name_tokens_any: ["compress", "codeware"]
+  ametank:
+    ext_any: [".mdl", ".xmt_txt"]
+    name_tokens_any: ["ametank", "ame"]
+  cad:
+    ext_any: [".dwg", ".dxf"]
+  pdf:
+    ext_any: [".pdf"]
+  excel:
+    ext_any: [".xlsx",".xlsm",".xls",".csv"]
+  word:
+    ext_any: [".docx",".doc"]
+  powerpoint:
+    ext_any: [".pptx",".ppt"]
+  archive:
+    ext_any: [".zip",".7z",".rar"]
+
+# ---- Skip obvious junk early (faster scans) ----
+ignore:
+  ext: [".tmp",".bak",".log",".zip",".7z",".rar",".~lock",".lnk"]
+  dir_tokens: ["$recycle.bin","thumbs.db","system volume information","cache","temp","~$"]
+
+# ---- Optional hard denylist (absolute prefixes) ----
+# denylist_paths:
+#   - "P:\\JOBS\\_DO_NOT_SCAN"
+#   - "P:\\ARCHIVES\\OLD JOBS\\really_huge_bin"
