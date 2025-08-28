@@ -3,14 +3,40 @@
 # + long-path open + parent-folder fallback + Recent searches dropdown
 import tkinter as tk
 from tkinter import ttk, messagebox
-import os, re, sqlite3, subprocess, threading, time, json
+import os, re, sqlite3, subprocess, threading, time, json, sys
 from pathlib import Path
 
-ROOT = Path(__file__).resolve().parents[1]
-DB_PATH = ROOT / "tankfinder.db"
+# -------- paths (works for EXE and source runs) --------
+def app_root() -> Path:
+    # folder of the EXE when frozen, else project root
+    return Path(sys.executable).resolve().parent if getattr(sys, "frozen", False) \
+           else Path(__file__).resolve().parents[1]
+
+def resolve_db_path() -> Path:
+    base = app_root()
+    # 1) explicit override
+    env = os.getenv("TANKFINDER_DB")
+    if env:
+        p = Path(env)
+        if p.exists():
+            return p
+    # 2) next to EXE/script
+    c1 = base / "tankfinder.db"
+    if c1.exists():
+        return c1
+    # 3) parent of /dist (when EXE is inside /dist)
+    c2 = base.parent / "tankfinder.db"
+    if c2.exists():
+        return c2
+    # default path (for a clear error message later)
+    return c1
+
+ROOT    = app_root()
+DB_PATH = resolve_db_path()
 INDEXER = ROOT / "indexer" / "indexer.py"
 
-RECENTS_DIR  = Path(os.getenv("LOCALAPPDATA", str(ROOT))) / "TankFinder"
+RECENTS_DIR = Path(os.getenv("LOCALAPPDATA", str(ROOT))) / "TankFinder"
+RECENTS_DIR.mkdir(parents=True, exist_ok=True)
 RECENTS_PATH = RECENTS_DIR / "recent.json"
 
 # ---------- helpers ----------
@@ -246,11 +272,39 @@ class App(tk.Tk):
         ttk.Label(self, textvariable=self.status, anchor="w", padding=(8,4)).pack(side=tk.BOTTOM, fill=tk.X)
 
         # DB
-        if not DB_PATH.exists():
-            messagebox.showerror("TankFinder", f"Database not found:\n{DB_PATH}")
-            self.destroy(); return
-        self.con = sqlite3.connect(f"file:{DB_PATH}?mode=ro", uri=True)
-        self.con.row_factory = sqlite3.Row
+        #!/usr/bin/env python3
+# TankFinder GUI (Tkinter) — FTS5 NEAR fix + job_id sorts by year + job count
+# + long-path open + parent-folder fallback + Recent searches dropdown
+
+
+    ROOT = Path(__file__).resolve().parents[1]
+    DB_PATH = ROOT / "tankfinder.db"
+    INDEXER = ROOT / "indexer" / "indexer.py"
+
+    RECENTS_DIR  = Path(os.getenv("LOCALAPPDATA", str(ROOT))) / "TankFinder"
+    RECENTS_PATH = RECENTS_DIR / "recent.json"
+
+    def app_root() -> Path:
+        # folder of the EXE when frozen, else project root
+        if getattr(sys, "frozen", False):
+            return Path(sys.executable).resolve().parent
+        return Path(__file__).resolve().parents[1]
+
+    def resolve_db_path() -> Path:
+        base = app_root()
+        candidates = [
+            base / "tankfinder.db",          # next to EXE (preferred)
+            base.parent / "tankfinder.db",   # parent (e.g., when EXE left in /dist)
+            Path(os.getenv("TANKFINDER_DB", "")),  # explicit override
+        ]
+        for c in candidates:
+            if c and str(c) != "" and c.exists():
+                return c
+        # fall back to "next to EXE" even if missing so the error message is specific
+        return candidates[0]
+
+    ROOT = app_root()
+    DB_PATH = resolve_db_path()
 
     # ---------- sorting ----------
     def sort_tree(self, tv: ttk.Treeview, col: str):

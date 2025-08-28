@@ -1,0 +1,72 @@
+# ===================== TankFinder config (clean) =====================
+
+# ---- JOBS + ARCHIVES roots ----
+roots:
+  - "P:\\JOBS"
+  - "P:\\ARCHIVES\\OLD JOBS"
+
+# ---- QUOTES root ----
+quotes_roots:
+  - "P:\\QUOTES"
+
+# ---- JOB ID pattern for JOBS/ARCHIVES (e.g., 101-23) ----
+job_id_regex: "(?P<job>\\b\\d{3}-\\d{2}\\b)"
+
+# ---- Scan policy for JOBS/ARCHIVES ----
+scan_policy:
+  only_year_dirs_under_roots: true
+  year_dir_regex: "^(19|20)\\d{2}$"   # strict: immediate child folders are 4-digit years
+  year_min: 2015
+  year_max: 2025
+
+# ---- QUOTES year gate (quote jobs are Q####-YY) ----
+quotes_scan:
+  year_min: 2022
+  year_max: 2100
+
+# ---- Hard denylist (absolute prefixes) ----
+denylist_paths:
+  - "P:\\$RECYCLE.BIN"
+  - "P:\\System Volume Information"
+
+# ---- PDF body-text extraction (applies to JOBS only; QUOTES are handled by code: Q#### PDFs only) ----
+pdf_text:
+  enabled: true
+  path_allow_tokens: ["calc","calcs","compress","ame","design","spec","quotes"]  # keeps JOBS PDF parsing focused
+  max_pages: 10
+  max_chars: 40000
+
+# ---- Office/text extraction (keep OFF unless Chris needs it) ----
+office_text:
+  enabled: false
+  include: ["xlsx","csv","docx","pptx","txt","md","xml","html","log"]
+  xlsx_sheet_limit: 3
+  xlsx_cells_limit: 400
+  csv_max_lines: 200
+  max_chars: 40000
+
+# ---- File-type detectors (badges/counters) ----
+detectors:
+  compress:
+    ext_any: [".cw7", ".xml"]
+    name_tokens_any: ["compress", "codeware"]
+  ametank:
+    ext_any: [".mdl", ".xmt_txt"]
+    name_tokens_any: ["ametank", "ame"]
+  cad:
+    ext_any: [".dwg", ".dxf"]
+  pdf:
+    ext_any: [".pdf"]
+  excel:
+    ext_any: [".xlsx", ".xlsm", ".xls", ".csv"]
+  word:
+    ext_any: [".docx", ".doc"]
+  powerpoint:
+    ext_any: [".pptx", ".ppt"]
+  archive:
+    ext_any: [".zip", ".7z", ".rar"]
+
+# ---- Quick skips (speed) ----
+ignore:
+  ext: [".tmp",".bak",".log",".zip",".7z",".rar",".~lock",".lnk"]
+  dir_tokens: ["$recycle.bin","thumbs.db","system volume information","cache","temp","~$"]
