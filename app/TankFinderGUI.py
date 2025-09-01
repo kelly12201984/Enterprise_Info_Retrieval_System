@@ -1,53 +1,59 @@
 #!/usr/bin/env python3
-# TankFinder GUI (Tkinter) — FTS5 NEAR fix + job_id sorts by year + job count
-# + long-path open + parent-folder fallback + Recent searches dropdown
+# TankFinder GUI (Tkinter)
+# - Caps headers
+# - FILES column renamed to "KEYWORD FILES"
+# - Center most columns; JOB/QUOTE ID stays left
+# - Status line centered, bigger, and used for progress/errors
+# - "UPDATE DATABASE" button with confirm + progress pulse
+# - "RESET" button to clear search + results
+# - Better long-path file opening and UNC handling
+# - NEAR fallback stays (shows a clear status)
 import tkinter as tk
 from tkinter import ttk, messagebox
 import os, re, sqlite3, subprocess, threading, time, json, sys
 from pathlib import Path
 
-# -------- paths (works for EXE and source runs) --------
+# ---------- location/DB resolution ----------
 def app_root() -> Path:
-    # folder of the EXE when frozen, else project root
-    return Path(sys.executable).resolve().parent if getattr(sys, "frozen", False) \
-           else Path(__file__).resolve().parents[1]
+    if getattr(sys, "frozen", False):  # running as EXE
+        return Path(sys.executable).resolve().parent
+    return Path(__file__).resolve().parents[1]
 
 def resolve_db_path() -> Path:
     base = app_root()
-    # 1) explicit override
-    env = os.getenv("TANKFINDER_DB")
-    if env:
-        p = Path(env)
-        if p.exists():
+    candidates = [
+        base / "tankfinder.db",        # next to EXE (preferred)
+        base.parent / "tankfinder.db", # parent of EXE (when left in /dist)
+    ]
+
+    env_db = os.getenv("TANKFINDER_DB")
+    if env_db:
+        p = Path(env_db)
+        if p.is_file():
             return p
-    # 2) next to EXE/script
-    c1 = base / "tankfinder.db"
-    if c1.exists():
-        return c1
-    # 3) parent of /dist (when EXE is inside /dist)
-    c2 = base.parent / "tankfinder.db"
-    if c2.exists():
-        return c2
-    # default path (for a clear error message later)
-    return c1
+
+    for c in candidates:
+        if c.is_file():
+            return c
+
+    # fall back to the preferred location for a clear error later
+    return candidates[0]
 
 ROOT    = app_root()
 DB_PATH = resolve_db_path()
 INDEXER = ROOT / "indexer" / "indexer.py"
 
-RECENTS_DIR = Path(os.getenv("LOCALAPPDATA", str(ROOT))) / "TankFinder"
-RECENTS_DIR.mkdir(parents=True, exist_ok=True)
-RECENTS_PATH = RECENTS_DIR / "recent.json"
-
 # ---------- helpers ----------
-def build_match_expr(q: str, use_near: bool, near_dist: int = 50) -> str:
-    """FTS5 MATCH; distance form is NEAR("a" "b" "c", N)."""
+_NON_ALNUM = re.compile(r"[^a-z0-9]+")
+
+def build_match_expr(q: str, use_near: bool) -> str:
     toks = [t for t in re.split(r"\W+", (q or "").lower()) if t]
-    if not toks:
-        return ""
+    if not toks: return ""
     if use_near and len(toks) >= 2:
-        inner = " ".join(f"\"{t}\"" for t in toks)
-        return f"NEAR({inner}, {near_dist})"
+        expr = f"\"{toks[0]}\""
+        for t in toks[1:]:
+            expr += f" NEAR \"{t}\""
+        return expr
     return " AND ".join(f"\"{t}\"" for t in toks)
 
 def year_filters(years: str | None):
@@ -56,330 +62,471 @@ def year_filters(years: str | None):
     for chunk in years.split(","):
         c = chunk.strip()
         if "-" in c:
-            a,b = c.split("-",1)
+            a, b = c.split("-", 1)
             try:
-                a=int(a); b=int(b)
-                for y in range(min(a,b), max(a,b)+1): parts.append(str(y))
+                a = int(a); b = int(b)
+                for y in range(min(a,b), max(a,b)+1):
+                    parts.append(str(y))
             except Exception:
                 pass
         elif c.isdigit():
             parts.append(c)
     return [f"j.root_path LIKE '%\\{y}\\%'" for y in sorted(set(parts))]
 
-def to_long_path(p: Path) -> str:
+def _to_extended_path(p: Path) -> str:
+    """Return a Windows extended-length path for long paths."""
     s = str(p)
-    if s.startswith("\\\\"):            # UNC -> \\?\UNC\server\share\...
-        return "\\\\?\\UNC" + s[1:]
-    return "\\\\?\\" + s                # Drive letter
-
-def exists_long(p: Path) -> bool:
-    try:
-        if p.exists(): return True
-    except Exception:
-        pass
-    try:
-        return os.path.exists(to_long_path(p))
-    except Exception:
-        return False
+    if s.startswith("\\\\"):
+        # UNC -> \\?\UNC\server\share\...
+        return "\\\\?\\UNC\\" + s.lstrip("\\")
+    return "\\\\?\\" + s
 
 def open_file_resilient(path: Path) -> None:
-    """Try normal open, then long-path open, else Explorer /select (normal then long)."""
-    s = str(path)
-    sl = to_long_path(path)
+    """Try multiple ways to open a file, including long paths and a final Explorer select."""
+    p = str(path)
+    # 1) normal
     try:
-        os.startfile(s)  # type: ignore[attr-defined]
+        os.startfile(p)  # type: ignore[attr-defined]
         return
     except Exception:
         pass
+    # 2) extended long-path
     try:
-        os.startfile(sl)  # type: ignore[attr-defined]
+        os.startfile(_to_extended_path(path))  # type: ignore[attr-defined]
         return
     except Exception:
         pass
+    # 3) PowerShell Start-Process (sometimes helps with associations)
     try:
-        subprocess.run(f'explorer /select,"{s}"', shell=True)
+        subprocess.run(
+            ["powershell", "-NoProfile", "-Command", f"Start-Process -FilePath '{p}'"],
+            check=False, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL
+        )
         return
     except Exception:
         pass
-    subprocess.run(f'explorer /select,"{sl}"', shell=True)
+    # 4) Explorer select as last resort
+    try:
+        subprocess.run(f'explorer /select,"{p}"', shell=True)
+    except Exception as e:
+        raise RuntimeError(str(e))
 
 def open_folder(path: Path) -> None:
-    s = str(path)
     try:
-        os.startfile(s)  # type: ignore[attr-defined]
-    except Exception:
-        os.startfile(to_long_path(path))  # type: ignore[attr-defined]
+        os.startfile(str(path))  # type: ignore[attr-defined]
+    except Exception as e:
+        raise RuntimeError(str(e))
 
-def job_year_from_job_id(job_id: str) -> int:
-    try:
-        yy = int(job_id.split("-")[-1])
-        return 1900 + yy if yy >= 90 else 2000 + yy
-    except Exception:
-        return 0
+def fmt_status(s: str) -> str:
+    return s.replace("\n", " ")[:200]
 
-def load_recents() -> list[str]:
-    try:
-        RECENTS_DIR.mkdir(parents=True, exist_ok=True)
-        if RECENTS_PATH.exists():
-            with open(RECENTS_PATH, "r", encoding="utf-8") as f:
-                v = json.load(f)
-                if isinstance(v, list): return [str(x) for x in v][:50]
-    except Exception:
-        pass
-    return []
-
-def save_recents(v: list[str]) -> None:
-    try:
-        RECENTS_DIR.mkdir(parents=True, exist_ok=True)
-        with open(RECENTS_PATH, "w", encoding="utf-8") as f:
-            json.dump(v[:50], f, ensure_ascii=False, indent=0)
-    except Exception:
-        pass
-
+# ---------- main app ----------
 # ---------- app ----------
 class App(tk.Tk):
     def __init__(self):
         super().__init__()
         self.title("TankFinder")
         self.geometry("1280x760")
-        self.minsize(980, 560)
+        self.minsize(1020, 600)
+            # styles
+        s = ttk.Style(self)
+        s.configure("Treeview.Heading", font=("Segoe UI", 10, "bold"))
 
-        self.recents = load_recents()
-
-        # Top controls
+            # ---- top bar (query) ----
         top = ttk.Frame(self, padding=8)
         top.pack(side=tk.TOP, fill=tk.X)
 
-        ttk.Label(top, text="Search:").grid(row=0, column=0, sticky="w")
+        # SHOW (far left)
+        ttk.Label(top, text="SHOW:").grid(row=0, column=0, sticky="e", padx=(0,4))
+        self.show_var = tk.StringVar(value="ALL")
+        self.show_combo = ttk.Combobox(top, textvariable=self.show_var, width=10,
+                                    values=["ALL","JOBS","QUOTES"], state="readonly")
+        self.show_combo.grid(row=0, column=1, sticky="w", padx=(0,12))
+        self.show_combo.bind("<<ComboboxSelected>>", lambda e: self.run_search())
+
+        # SEARCH label + entry (after SHOW)
+        ttk.Label(top, text="SEARCH:").grid(row=0, column=2, sticky="w")
         self.q_var = tk.StringVar()
-        self.q_entry = ttk.Entry(top, textvariable=self.q_var, width=40)
-        self.q_entry.grid(row=0, column=1, padx=(4,12), sticky="we")
-        self.q_entry.focus_set()
+        self.q_entry = ttk.Entry(top, textvariable=self.q_var, width=48)
+        self.q_entry.grid(row=0, column=3, padx=(6,12), sticky="we")
         self.q_entry.bind("<Return>", lambda e: self.run_search())
 
+        # TIGHTEN SEARCH
         self.near_var = tk.BooleanVar(value=True)
-        ttk.Checkbutton(top, text="Use NEAR", variable=self.near_var).grid(row=0, column=2, sticky="w")
+        ttk.Checkbutton(top, text="TIGHTEN SEARCH", variable=self.near_var).grid(row=0, column=4, sticky="w")
 
-        ttk.Label(top, text="Years:").grid(row=0, column=3, sticky="e", padx=(12,2))
+        # YEARS
+        ttk.Label(top, text="YEARS:").grid(row=0, column=5, sticky="e", padx=(12,4))
         self.years_var = tk.StringVar(value="2019-2025")
-        years_entry = ttk.Entry(top, textvariable=self.years_var, width=14)
-        years_entry.grid(row=0, column=4, sticky="w")
-        years_entry.bind("<Return>", lambda e: self.run_search())
+        ttk.Entry(top, textvariable=self.years_var, width=16).grid(row=0, column=6, sticky="w")
 
+        # quick badges
         self.compress_var = tk.BooleanVar(value=False)
         self.ame_var      = tk.BooleanVar(value=False)
         self.cad_var      = tk.BooleanVar(value=False)
         self.pdf_var      = tk.BooleanVar(value=False)
-        ttk.Checkbutton(top, text="COMPRESS", variable=self.compress_var).grid(row=0, column=5, padx=(12,0))
-        ttk.Checkbutton(top, text="AME",      variable=self.ame_var).grid(row=0, column=6)
-        ttk.Checkbutton(top, text="CAD",      variable=self.cad_var).grid(row=0, column=7)
-        ttk.Checkbutton(top, text="PDF",      variable=self.pdf_var).grid(row=0, column=8)
+        ttk.Checkbutton(top, text="COMPRESS", variable=self.compress_var).grid(row=0, column=7, padx=(12,0))
+        ttk.Checkbutton(top, text="AME",      variable=self.ame_var).grid(row=0, column=8)
+        ttk.Checkbutton(top, text="CAD",      variable=self.cad_var).grid(row=0, column=9)
+        ttk.Checkbutton(top, text="PDF",      variable=self.pdf_var).grid(row=0, column=10)
 
-        ttk.Label(top, text="Limit:").grid(row=0, column=9, sticky="e", padx=(12,2))
+        # LIMIT
+        ttk.Label(top, text="LIMIT:").grid(row=0, column=11, sticky="e", padx=(12,4))
         self.limit_var = tk.IntVar(value=50)
-        limit_entry = ttk.Entry(top, textvariable=self.limit_var, width=6)
-        limit_entry.grid(row=0, column=10, sticky="w")
-        limit_entry.bind("<Return>", lambda e: self.run_search())
+        ttk.Entry(top, textvariable=self.limit_var, width=7).grid(row=0, column=12, sticky="w")
 
-        ttk.Button(top, text="Search",    command=self.run_search).grid(row=0, column=11, padx=(12,0))
-        ttk.Button(top, text="Nerd Mode", command=self.open_sql_console).grid(row=0, column=12, padx=(8,0))
+        # SEARCH button (at the end of the row)
+        ttk.Button(top, text="SEARCH", command=self.run_search).grid(row=0, column=13, padx=(12,0))
 
-        # Recent searches
-        ttk.Label(top, text="Recent:").grid(row=0, column=13, sticky="e", padx=(12,2))
-        self.recent_var = tk.StringVar()
-        self.recent_box = ttk.Combobox(top, textvariable=self.recent_var, width=28, values=self.recents, state="readonly")
-        self.recent_box.grid(row=0, column=14, sticky="w")
-        self.recent_box.bind("<<ComboboxSelected>>", lambda e: (self.q_var.set(self.recent_var.get()), self.run_search()))
+        # make the text entry stretch
+        top.columnconfigure(3, weight=1)
 
-        # Refresh Index controls (quick/full)
-        self.full_refresh_var = tk.BooleanVar(value=False)
-        ttk.Checkbutton(top, text="Full", variable=self.full_refresh_var).grid(row=0, column=15, padx=(12,2))
-        ttk.Button(top, text="Refresh Index", command=self.refresh_index).grid(row=0, column=16)
 
-        top.columnconfigure(1, weight=1)
-
-        # Panes
+            # ---- panes ----
         panes = ttk.Panedwindow(self, orient=tk.HORIZONTAL)
-        panes.pack(fill=tk.BOTH, expand=True, padx=8, pady=(0,8))
+        panes.pack(fill=tk.BOTH, expand=True, padx=8, pady=(0, 8))
 
-        # Jobs pane
+        # ---- left: jobs ----
         left = ttk.Frame(panes)
-        self.jobs_title = ttk.Label(left, text="Jobs (ranked by hits)")
-        self.jobs_title.pack(anchor="w")
+        ttk.Label(left, text="JOBS (RANKED BY HITS)").pack(anchor="w")
 
         self.job_cols = ("job_id","hits","pdfs","cad","compress","ame","badges","root_path")
         headings = {
-            "job_id":"job_id", "hits":"hits",
-            "pdfs":"#pdf", "cad":"#cad", "compress":"#compress", "ame":"#ame",
-            "badges":"badges", "root_path":"root_path"
+            "job_id":"JOB/QUOTE ID", "hits":"HITS",
+            "pdfs":"#PDF", "cad":"#CAD", "compress":"#COMPRESS", "ame":"#AME",
+            "badges":"BADGES", "root_path":"FOLDER LOCATION"
         }
 
-        job_wrap = ttk.Frame(left); job_wrap.pack(fill=tk.BOTH, expand=True)
-        self.jobs = ttk.Treeview(job_wrap, columns=self.job_cols, show="headings")
-        job_scroll = ttk.Scrollbar(job_wrap, orient="vertical", command=self.jobs.yview)
-        self.jobs.configure(yscrollcommand=job_scroll.set)
+        job_wrap = ttk.Frame(left)
+        job_wrap.pack(fill=tk.BOTH, expand=True)
+
+        self.jobs = ttk.Treeview(job_wrap, columns=self.job_cols, show="headings")  # no fixed height
+        job_vscroll = ttk.Scrollbar(job_wrap, orient="vertical", command=self.jobs.yview)
+        job_hscroll = ttk.Scrollbar(job_wrap, orient="horizontal", command=self.jobs.xview)
+        self.jobs.configure(yscrollcommand=job_vscroll.set, xscrollcommand=job_hscroll.set)
+
+        width_map = {"job_id":120,"hits":80,"pdfs":68,"cad":68,"compress":100,"ame":68,"badges":220,"root_path":720}
         for c in self.job_cols:
             self.jobs.heading(c, text=headings[c], command=lambda col=c: self.sort_tree(self.jobs, col))
-            self.jobs.column(c, width={"job_id":90,"hits":70,"pdfs":60,"cad":60,"compress":90,"ame":60,
-                                       "badges":180,"root_path":650}[c], anchor="w")
+            # left-align job_id, badges, root_path; center others
+            anchor = "w" if c in ("job_id","badges","root_path") else "center"
+            self.jobs.column(c, width=width_map[c], anchor=anchor, stretch=True)
+
+        # also left-align those headers themselves
+        for c in ("job_id","badges","root_path"):
+            self.jobs.heading(c, anchor="w")
+
         self.jobs.grid(row=0, column=0, sticky="nsew")
-        job_scroll.grid(row=0, column=1, sticky="ns")
-        job_wrap.rowconfigure(0, weight=1); job_wrap.columnconfigure(0, weight=1)
+        job_vscroll.grid(row=0, column=1, sticky="ns")
+        job_hscroll.grid(row=1, column=0, sticky="ew")
+        job_wrap.rowconfigure(0, weight=1)
+        job_wrap.columnconfigure(0, weight=1)
 
         self.jobs.bind("<<TreeviewSelect>>", self.on_job_select)
         self.jobs.bind("<Double-1>", self.on_open_job)
         self.jobs.bind("<Return>",   self.on_open_job)
 
-        btns = ttk.Frame(left); btns.pack(fill=tk.X, pady=(4,0))
-        ttk.Button(btns, text="Open Job Folder", command=self.on_open_job).pack(side=tk.LEFT)
-        ttk.Button(btns, text="Copy Job Path", command=self.copy_job_path).pack(side=tk.LEFT, padx=6)
+        btns = ttk.Frame(left)
+        btns.pack(fill=tk.X, pady=(4, 0))
+        ttk.Button(btns, text="OPEN JOB FOLDER", command=self.on_open_job).pack(side=tk.LEFT)
+        ttk.Button(btns, text="COPY JOB PATH",   command=self.copy_job_path).pack(side=tk.LEFT, padx=6)
+
         panes.add(left, weight=1)
 
-        # Files pane
+        # ---- right: files ----
         right = ttk.Frame(panes)
         header = ttk.Frame(right); header.pack(fill=tk.X)
-        ttk.Label(header, text="Files").pack(side=tk.LEFT)
+        ttk.Label(header, text="FILES").pack(side=tk.LEFT)
 
-        ttk.Label(header, text="   Show:").pack(side=tk.LEFT)
+        ttk.Label(header, text="   SHOW:").pack(side=tk.LEFT)
         self.file_filter_var = tk.StringVar(value="All")
         self.file_filter = ttk.Combobox(
-            header, textvariable=self.file_filter_var, width=14,
-            values=["All","PDFs","CAD","Images","Excel","Word","PowerPoint","Text","COMPRESS","AME"]
+            header, textvariable=self.file_filter_var, width=12,
+            values=["All","PDFs","CAD","COMPRESS","AME","Text"], state="readonly"
         )
-        self.file_filter.state(["readonly"])
-        self.file_filter.pack(side=tk.LEFT, padx=(4,0))
+        self.file_filter.pack(side=tk.LEFT, padx=(4, 0))
         self.file_filter.bind("<<ComboboxSelected>>", lambda e: self.refresh_file_list())
 
-        files_wrap = ttk.Frame(right); files_wrap.pack(fill=tk.BOTH, expand=True)
-        self.files = ttk.Treeview(files_wrap, columns=("rel_path",), show="headings")
-        files_scroll = ttk.Scrollbar(files_wrap, orient="vertical", command=self.files.yview)
-        self.files.configure(yscrollcommand=files_scroll.set)
-        self.files.heading("rel_path", text="rel_path", command=lambda: self.sort_tree(self.files, "rel_path"))
-        self.files.column("rel_path", width=780, anchor="w")
-        self.files.grid(row=0, column=0, sticky="nsew")
-        files_scroll.grid(row=0, column=1, sticky="ns")
-        files_wrap.rowconfigure(0, weight=1); files_wrap.columnconfigure(0, weight=1)
-        self.files.bind("<Double-1>", self.on_open_file)
-        self.files.bind("<Return>",   self.on_open_file)
+        files_wrap = ttk.Frame(right)
+        files_wrap.pack(fill=tk.BOTH, expand=True)
 
-        fbtns = ttk.Frame(right); fbtns.pack(fill=tk.X, pady=(4,0))
-        ttk.Button(fbtns, text="Open File", command=self.on_open_file).pack(side=tk.LEFT)
-        ttk.Button(fbtns, text="Copy File Path", command=self.copy_file_path).pack(side=tk.LEFT, padx=6)
+        self.files = ttk.Treeview(files_wrap, columns=("rel_path",), show="headings")  # no fixed height
+        files_vscroll = ttk.Scrollbar(files_wrap, orient="vertical", command=self.files.yview)
+        files_hscroll = ttk.Scrollbar(files_wrap, orient="horizontal", command=self.files.xview)
+        self.files.configure(yscrollcommand=files_vscroll.set, xscrollcommand=files_hscroll.set)
+
+        self.files.heading("rel_path", text="JOB FILES", anchor="w",
+                        command=lambda: self.sort_tree(self.files, "rel_path"))
+        self.files.column("rel_path", width=820, anchor="w", stretch=True)
+
+        self.files.grid(row=0, column=0, sticky="nsew")
+        files_vscroll.grid(row=0, column=1, sticky="ns")
+        files_hscroll.grid(row=1, column=0, sticky="ew")
+        files_wrap.rowconfigure(0, weight=1)
+        files_wrap.columnconfigure(0, weight=1)
+
+        fbtns = ttk.Frame(right)
+        fbtns.pack(fill=tk.X, pady=(4, 0))
+        ttk.Button(fbtns, text="OPEN FILE",      command=self.on_open_file).pack(side=tk.LEFT)
+        ttk.Button(fbtns, text="COPY FILE PATH", command=self.copy_file_path).pack(side=tk.LEFT, padx=6)
+
         panes.add(right, weight=1)
 
-        # Status
-        self.status = tk.StringVar(value="Ready")
-        ttk.Label(self, textvariable=self.status, anchor="w", padding=(8,4)).pack(side=tk.BOTTOM, fill=tk.X)
 
-        # DB
-        #!/usr/bin/env python3
-# TankFinder GUI (Tkinter) — FTS5 NEAR fix + job_id sorts by year + job count
-# + long-path open + parent-folder fallback + Recent searches dropdown
+            # ---- bottom bar (status + actions) ----
+        bottom = ttk.Frame(self, padding=(8, 6))
+        bottom.pack(side=tk.BOTTOM, fill=tk.X)
+
+        # 3 zones: LEFT (nerd), CENTER (status), RIGHT (actions)
+        bottom.grid_columnconfigure(0, weight=0)   # left controls
+        bottom.grid_columnconfigure(1, weight=1)   # status expands
+        bottom.grid_columnconfigure(2, weight=0)   # right controls
+
+        # LEFT: NERD MODE (anchor hard-left, under OPEN JOB FOLDER visually)
+        ttk.Button(bottom, text="NERD MODE", command=self.open_sql_console)\
+        .grid(row=0, column=0, sticky="w")
+
+        # CENTER: centered status (bold)
+        self.status_var = tk.StringVar(value="READY")
+        self.status = self.status_var
+        self.status_label = ttk.Label(bottom, textvariable=self.status_var, anchor="center")
+        self.status_label.configure(font=("Segoe UI", 14, "bold"))
+        self.status_label.grid(row=0, column=1, sticky="ew", padx=8)
+
+        # RIGHT: CLEAR RESULTS + UPDATE DATABASE
+        right = ttk.Frame(bottom)
+        right.grid(row=0, column=2, sticky="e")
+        ttk.Button(right, text="CLEAR RESULTS", command=self.clear_search).pack(side=tk.LEFT, padx=(0,8))
+        ttk.Button(right, text="UPDATE DATABASE", command=self.refresh_index).pack(side=tk.LEFT)
+
+        # keybinds
+        self.bind("<Escape>", lambda _e: self.clear_search())
 
 
-    ROOT = Path(__file__).resolve().parents[1]
-    DB_PATH = ROOT / "tankfinder.db"
-    INDEXER = ROOT / "indexer" / "indexer.py"
 
-    RECENTS_DIR  = Path(os.getenv("LOCALAPPDATA", str(ROOT))) / "TankFinder"
-    RECENTS_PATH = RECENTS_DIR / "recent.json"
+        # ---- DB open (robust) ----
+        dbp = DB_PATH
 
-    def app_root() -> Path:
-        # folder of the EXE when frozen, else project root
-        if getattr(sys, "frozen", False):
-            return Path(sys.executable).resolve().parent
-        return Path(__file__).resolve().parents[1]
+        # Show progress in the centered status ASAP
+        try:
+            self.status.set(f"OPENING DB…")
+        except Exception:
+            pass
 
-    def resolve_db_path() -> Path:
-        base = app_root()
-        candidates = [
-            base / "tankfinder.db",          # next to EXE (preferred)
-            base.parent / "tankfinder.db",   # parent (e.g., when EXE left in /dist)
-            Path(os.getenv("TANKFINDER_DB", "")),  # explicit override
-        ]
-        for c in candidates:
-            if c and str(c) != "" and c.exists():
-                return c
-        # fall back to "next to EXE" even if missing so the error message is specific
-        return candidates[0]
+        # Fast sanity checks (avoid picking a directory or a bad env value)
+        if not dbp or str(dbp).strip() == "":
+            messagebox.showerror("TankFinder", "Database path is empty."); self.destroy(); return
+        if dbp.is_dir():
+            messagebox.showerror("TankFinder", f"Database path is a directory, not a file:\n{dbp}")
+            self.destroy(); return
 
-    ROOT = app_root()
-    DB_PATH = resolve_db_path()
+        # If this is a mapped drive/UNC that’s slow or disconnected, exists() can stall.
+        # Do a lightweight stat in a short thread and bail if it’s taking too long.
+        exists_flag = {"ok": False}
+        def _probe():
+            try:
+                exists_flag["ok"] = dbp.exists() and dbp.is_file()
+            except Exception:
+                exists_flag["ok"] = False
+        t = threading.Thread(target=_probe, daemon=True)
+        t.start(); t.join(2.0)  # wait up to 2 seconds
+        if not exists_flag["ok"]:
+            messagebox.showerror("TankFinder", f"Database not found or not reachable:\n{dbp}")
+            self.destroy(); return
+
+        def _uri(p: Path) -> str:
+            # Use immutable=1 to hint SQLite this file won’t change (faster on network)
+            return "file:" + p.resolve().as_posix() + "?mode=ro&immutable=1"
+
+        try:
+            # Keep timeout small so we don't hang forever if the share hiccups
+            self.con = sqlite3.connect(_uri(dbp), uri=True, timeout=2.0)
+        except Exception:
+            try:
+                self.con = sqlite3.connect(str(dbp), timeout=2.0)
+            except Exception as e:
+                messagebox.showerror("TankFinder", f"Couldn't open database:\n{dbp}\n\n{e}")
+                self.destroy(); return
+
+        try:
+            self.con.execute("PRAGMA query_only=ON;")
+        except Exception:
+            pass
+        self.con.row_factory = sqlite3.Row
+        self.status.set("READY")
+        print("[TankFinder] DB opened OK.")
+
+
+    # ---------------- helpers / actions ----------------
+    def set_status(self, msg: str, *, transient_ms: int | None = None):
+        if hasattr(self, "status_var"):
+            self.status_var.set(msg)
+            if transient_ms:
+                self.after(transient_ms, self.clear_status)
+
+    def clear_status(self):
+        if hasattr(self, "status_var"):
+            self.status_var.set("")
+
+    def _clear_tree(self, tree: ttk.Treeview):
+        for iid in tree.get_children():
+            tree.delete(iid)
+
+    def clear_search(self):
+        # text inputs
+        if hasattr(self, "q_var"):     self.q_var.set("")
+        if hasattr(self, "years_var"): self.years_var.set("")
+
+        # toggles
+        if hasattr(self, "near_var"):     self.near_var.set(True)
+        if hasattr(self, "compress_var"): self.compress_var.set(False)
+        if hasattr(self, "ame_var"):      self.ame_var.set(False)
+        if hasattr(self, "cad_var"):      self.cad_var.set(False)
+        if hasattr(self, "pdf_var"):      self.pdf_var.set(False)
+
+        # dropdowns
+        if hasattr(self, "show_var"):        self.show_var.set("All")
+        if hasattr(self, "file_filter_var"): self.file_filter_var.set("All")
+
+        # tables
+        if hasattr(self, "jobs"):  self._clear_tree(self.jobs)
+        if hasattr(self, "files"): self._clear_tree(self.files)
+
+        # focus & status
+        if hasattr(self, "q_entry"): self.q_entry.focus_set()
+        self.set_status("Cleared. Ready.", transient_ms=1600)
+
+        # ---- DB open (robust) ----
+        dbp = DB_PATH
+
+        if not dbp.exists():
+            messagebox.showerror("TankFinder", f"Database not found:\n{dbp}")
+            self.destroy(); return
+
+        def _uri(p: Path) -> str:
+            # SQLite likes forward slashes in file: URIs
+            return "file:" + p.resolve().as_posix() + "?mode=ro"
+
+        try:
+            # Prefer strict read-only via URI
+            self.con = sqlite3.connect(_uri(dbp), uri=True)
+        except Exception:
+            # Fallback to plain path (helps on some Windows setups)
+            try:
+                self.con = sqlite3.connect(str(dbp))
+            except Exception as e:
+                messagebox.showerror("TankFinder", f"Couldn't open database:\n{dbp}\n\n{e}")
+                self.destroy(); return
+
+        # Belt-and-suspenders: keep connection query-only
+        try:
+            self.con.execute("PRAGMA query_only=ON;")
+        except Exception:
+            pass
+
+        self.con.row_factory = sqlite3.Row
+        # Optional: show where we're connected
+        # self.status.set(f"DB: {dbp}")
+
 
     # ---------- sorting ----------
     def sort_tree(self, tv: ttk.Treeview, col: str):
-        # Special: sort job_id by parsed year
-        if tv is self.jobs and col == "job_id":
-            rows = list(tv.get_children(""))
-            ascending = not tv.heading(col, "text").endswith("▲")
-            rows.sort(key=lambda k: (job_year_from_job_id(tv.set(k, "job_id")), tv.set(k, "job_id")),
-                      reverse=not ascending)
-            for idx, k in enumerate(rows):
-                tv.move(k, "", idx)
-            for c in self.job_cols: tv.heading(c, text=c)
-            tv.heading(col, text=f"{col} {'▲' if ascending else '▼'}")
-            return
-
         data = [(tv.set(k, col), k) for k in tv.get_children("")]
+
+        def key_jobid(v):
+            # sort by year (YY) then numeric job within year when possible
+            s = str(v)
+            # JOB pattern 123-45
+            m = re.search(r"\b(\d{3})-(\d{2})\b", s)
+            if m:
+                num = int(m.group(1)); yy = int(m.group(2))
+                year = 1900 + yy if yy >= 90 else 2000 + yy
+                return (year, num, s)
+            # QUOTE pattern Q####-YY
+            mq = re.search(r"\bQ(\d+)-(\d{2})\b", s, re.I)
+            if mq:
+                qn = int(mq.group(1)); yy = int(mq.group(2))
+                year = 1900 + yy if yy >= 90 else 2000 + yy
+                return (year, qn, s)
+            return (9999, 999999, s)
+
         try:
-            data = [(float(v) if v not in ("", "-") else -1e99, k) for v, k in data]
+            if col == "job_id":
+                data.sort(key=lambda x: key_jobid(x[0]))
+            else:
+                data = [(float(v) if v not in ("", "-") else -1e99, k) for v, k in data]
+                data.sort()
         except Exception:
-            pass
-        ascending = not tv.heading(col, "text").endswith("▲")
-        data.sort(reverse=not ascending)
-        for idx, (_, k) in enumerate(data): tv.move(k, "", idx)
+            data.sort()
+
+        # toggle direction
+        ascending = not self.jobs.heading(col, "text").endswith("▲") if tv is self.jobs else True
+        if not ascending: data.reverse()
+        for idx, (_, k) in enumerate(data):
+            tv.move(k, "", idx)
+
+        # reset headings
         columns = self.job_cols if tv is self.jobs else ("rel_path",)
-        for c in columns: tv.heading(c, text=c)
-        tv.heading(col, text=f"{col} {'▲' if ascending else '▼'}")
+        for c in columns:
+            txt = self.jobs.heading(c, "text") if tv is self.jobs else self.files.heading(c, "text")
+            (self.jobs if tv is self.jobs else self.files).heading(c, text=txt.replace(" ▲","").replace(" ▼",""))
+        (self.jobs if tv is self.jobs else self.files).heading(col,
+            text=(self.jobs.heading(col, "text") if tv is self.jobs else self.files.heading(col, "text")) + (" ▲" if ascending else " ▼"))
 
     # ---------- queries ----------
-    def push_recent(self, q: str):
-        if not q: return
-        # put q at front, dedupe, clamp 20
-        new = [q] + [x for x in self.recents if x != q]
-        self.recents = new[:20]
-        save_recents(self.recents)
-        self.recent_box["values"] = self.recents
-
     def run_search(self):
-        self.status.set("Searching…"); self.update_idletasks()
+        self.status.set("SEARCHING…"); self.update_idletasks()
 
-        where = []; params = []
-        q = self.q_var.get().strip()
-        match_expr = build_match_expr(q, use_near=self.near_var.get(), near_dist=50)
+        where, params = [], []
+        q = (self.q_var.get() or "").strip()
+        match_expr = build_match_expr(q, use_near=self.near_var.get())
+        used_near = bool(self.near_var.get() and " NEAR " in match_expr)
+
+        # FTS join/predicate
         if q:
             fts_join = "JOIN fts_files ff ON ff.file_hash16 = f.file_hash16"
-            fts_pred = "ff.content MATCH ?"; params.append(match_expr)
+            fts_pred = "ff.content MATCH ?"
+            params.append(match_expr)
         else:
             fts_join = "LEFT JOIN fts_files ff ON ff.file_hash16 = f.file_hash16"
             fts_pred = "1=1"
 
+        # quick filters
         if self.compress_var.get(): where.append("j.has_compress = 1")
         if self.ame_var.get():      where.append("j.has_ame = 1")
         if self.cad_var.get():      where.append("j.has_dwg_dxf = 1")
         if self.pdf_var.get():      where.append("j.has_pdf = 1")
+
         ylikes = year_filters(self.years_var.get())
         if ylikes: where.append("(" + " OR ".join(ylikes) + ")")
+
+        # SHOW filter (ALL/JOBS/QUOTES)
+        show = (self.show_var.get() if hasattr(self, "show_var") else "ALL").upper()
+        if show == "JOBS":
+            where.append("j.job_id NOT LIKE 'Q%'")
+        elif show == "QUOTES":
+            where.append("j.job_id LIKE 'Q%'")
+
         where_sql = " AND ".join([fts_pred] + where) if where else fts_pred
 
         sql = f"""
         WITH hits AS (
-          SELECT DISTINCT f.job_id, f.file_hash16
-          FROM files f
-          {fts_join}
-          JOIN jobs j ON j.job_id=f.job_id
-          WHERE f.deleted=0 AND {where_sql}
+        SELECT DISTINCT f.job_id, f.file_hash16
+        FROM files f
+        {fts_join}
+        JOIN jobs j ON j.job_id=f.job_id
+        WHERE f.deleted=0 AND {where_sql}
         )
         SELECT
-          j.job_id, j.root_path,
-          j.has_compress, j.has_ame, j.has_dwg_dxf, j.has_pdf,
-          COUNT(h.file_hash16) AS n_hits,
-          (SELECT COUNT(*) FROM files x WHERE x.job_id=j.job_id AND x.deleted=0 AND x.ext='.pdf') AS n_pdf,
-          (SELECT COUNT(*) FROM files x WHERE x.job_id=j.job_id AND x.deleted=0 AND x.ext IN('.dwg','.dxf')) AS n_cad,
-          (SELECT COUNT(*) FROM files x WHERE x.job_id=j.job_id AND x.deleted=0 AND (
-               instr(x.detector_hits,'compress')>0 OR x.ext IN('.cw7','.xml','.out','.lst','.txt','.html','.htm'))) AS n_compress,
-          (SELECT COUNT(*) FROM files x WHERE x.job_id=j.job_id AND x.deleted=0 AND (
-               instr(x.detector_hits,'ametank')>0 OR x.ext IN('.mdl','.xmt_txt','.txt','.html','.htm'))) AS n_ame
+        j.job_id, j.root_path,
+        j.has_compress, j.has_ame, j.has_dwg_dxf, j.has_pdf,
+        COUNT(h.file_hash16) AS n_hits,
+        (SELECT COUNT(*) FROM files x WHERE x.job_id=j.job_id AND x.deleted=0 AND x.ext='.pdf') AS n_pdf,
+        (SELECT COUNT(*) FROM files x WHERE x.job_id=j.job_id AND x.deleted=0 AND x.ext IN('.dwg','.dxf')) AS n_cad,
+        (SELECT COUNT(*) FROM files x WHERE x.job_id=j.job_id AND x.deleted=0 AND (
+            instr(x.detector_hits,'compress')>0 OR x.ext IN('.cw7','.xml','.out','.lst','.txt','.html','.htm'))) AS n_compress,
+        (SELECT COUNT(*) FROM files x WHERE x.job_id=j.job_id AND x.deleted=0 AND (
+            instr(x.detector_hits,'ametank')>0 OR x.ext IN('.mdl','.xmt_txt','.txt','.html','.htm'))) AS n_ame
         FROM hits h
         JOIN jobs j ON j.job_id=h.job_id
         GROUP BY j.job_id, j.root_path, j.has_compress, j.has_ame, j.has_dwg_dxf, j.has_pdf
@@ -387,51 +534,57 @@ class App(tk.Tk):
         LIMIT ?
         """
 
+        def _fill_jobs(rows):
+            self.jobs.delete(*self.jobs.get_children())
+            for r in rows:
+                badges = []
+                if r["has_compress"]: badges.append("COMPRESS")
+                if r["has_ame"]:      badges.append("AME")
+                if r["has_dwg_dxf"]:  badges.append("CAD")
+                if r["has_pdf"]:      badges.append("PDF")
+                # Quote badge if a quote job has at least one PDF
+                if str(r["job_id"]).upper().startswith("Q") and r["n_pdf"] > 0:
+                    badges.append("QUOTE.PDF")
+                self.jobs.insert(
+                    "", "end", iid=r["job_id"],
+                    values=(r["job_id"], r["n_hits"], r["n_pdf"], r["n_cad"], r["n_compress"], r["n_ame"],
+                            ", ".join(badges) or "-", r["root_path"])
+                )
+
         try:
             rows = self.con.execute(sql, (*params, int(self.limit_var.get()))).fetchall()
-            if q and self.near_var.get() and len(rows) == 0:
-                match_expr2 = build_match_expr(q, use_near=False)
-                params2 = [match_expr2] + params[1:]
-                rows = self.con.execute(sql, (*params2, int(self.limit_var.get()))).fetchall()
-                self.status.set("No NEAR hits; fell back to AND")
+            _fill_jobs(rows)
+            self.files.delete(*self.files.get_children())
         except Exception as e:
-            messagebox.showerror("Query error", str(e)); self.status.set("Error"); return
+            messagebox.showerror("Query error", str(e))
+            self.status.set("ERROR")
+            return
 
-        # populate jobs
-        self.jobs.delete(*self.jobs.get_children())
-        for r in rows:
-            badges = []
-            if r["has_compress"]: badges.append("COMPRESS")
-            if r["has_ame"]:      badges.append("AME")
-            if r["has_dwg_dxf"]:  badges.append("CAD")
-            if r["has_pdf"]:      badges.append("PDF")
-            self.jobs.insert(
-                "", "end", iid=r["job_id"],
-                values=(r["job_id"], r["n_hits"], r["n_pdf"], r["n_cad"], r["n_compress"], r["n_ame"],
-                        ", ".join(badges) or "-", r["root_path"])
-            )
-        self.files.delete(*self.files.get_children())
+        # NEAR fallback → AND
+        if used_near and not rows:
+            try:
+                match_and = build_match_expr(q, use_near=False)
+                rows2 = self.con.execute(sql, (match_and, int(self.limit_var.get()))).fetchall()
+            except Exception:
+                rows2 = []
+            _fill_jobs(rows2)
+            self.status.set(f"No NEAR hits; fell back to AND — {len(rows2)} job(s)")
+        else:
+            self.status.set(f"{len(rows)} job(s)")
 
-        count = len(rows)
-        self.status.set(f"{count} job(s)")
-        self.jobs_title.config(text=f"Jobs (ranked by hits) — {count} found")
-        self.push_recent(q)
 
     def _file_filter_sql(self):
-        c = self.file_filter_var.get()
-        if c == "All":        return "1=1"
-        if c == "PDFs":       return "f.ext='.pdf'"
-        if c == "CAD":        return "f.ext IN('.dwg','.dxf')"
-        if c == "Images":     return "f.ext IN('.jpg','.jpeg','.png','.bmp','.tif','.tiff','.heic')"
-        if c == "Excel":      return "f.ext IN('.xlsx','.xlsm','.xls','.csv')"
-        if c == "Word":       return "f.ext IN('.docx','.doc')"
-        if c == "PowerPoint": return "f.ext IN('.pptx','.ppt')"
-        if c == "Text":       return "f.ext IN('.txt','.xml','.html','.htm','.xmt_txt','.md','.log','.csv')"
-        if c == "COMPRESS":   return "(instr(f.detector_hits,'compress')>0 OR f.ext IN('.cw7','.xml','.out','.lst','.txt','.html','.htm'))"
-        if c == "AME":        return "(instr(f.detector_hits,'ametank')>0 OR f.ext IN('.mdl','.xmt_txt','.txt','.html','.htm'))"
+        choice = self.file_filter_var.get()
+        if choice == "All":       return "1=1"
+        if choice == "PDFs":      return "f.ext='.pdf'"
+        if choice == "CAD":       return "f.ext IN('.dwg','.dxf')"
+        if choice == "COMPRESS":  return "(instr(f.detector_hits,'compress')>0 OR f.ext IN('.cw7','.xml','.out','.lst','.txt','.html','.htm'))"
+        if choice == "AME":       return "(instr(f.detector_hits,'ametank')>0 OR f.ext IN('.mdl','.xmt_txt','.txt','.html','.htm'))"
+        if choice == "Text":      return "f.ext IN('.txt','.xml','.html','.htm','.xmt_txt','.csv')"
         return "1=1"
 
-    def on_job_select(self, *_): self.refresh_file_list()
+    def on_job_select(self, *_):
+        self.refresh_file_list()
 
     def refresh_file_list(self):
         sel = self.jobs.selection()
@@ -440,9 +593,8 @@ class App(tk.Tk):
         job_id = sel[0]
         q = self.q_var.get().strip()
         pred = self._file_filter_sql()
-
         if q:
-            match_expr = build_match_expr(q, use_near=self.near_var.get(), near_dist=50)
+            match_expr = build_match_expr(q, use_near=self.near_var.get())
             sql = f"""
             SELECT f.rel_path
             FROM files f
@@ -461,18 +613,8 @@ class App(tk.Tk):
             LIMIT 1000
             """
             params = (job_id,)
-
-        try:
-            rows = self.con.execute(sql, params).fetchall()
-            if q and self.near_var.get() and len(rows) == 0:
-                match_expr2 = build_match_expr(q, use_near=False)
-                rows = self.con.execute(sql, (job_id, match_expr2)).fetchall()
-                self.status.set("No NEAR hits; fell back to AND")
-        except Exception as e:
-            messagebox.showerror("Query error", str(e)); return
-
         self.files.delete(*self.files.get_children())
-        for fr in rows:
+        for fr in self.con.execute(sql, params):
             self.files.insert("", "end", values=(fr["rel_path"],))
 
     # --- job/file actions ---
@@ -498,32 +640,26 @@ class App(tk.Tk):
 
     def on_open_file(self, *_):
         sel_job = self.jobs.selection(); sel_file = self.files.selection()
-        if not sel_job or not sel_file:
-            self.status.set("Select a job and a file first"); return
+        if not sel_job or not sel_file: return
         root = self.get_selected_job_root()
         rel = self.files.item(sel_file[0], "values")[0]
         full = (root / rel) if root else None
         if not full:
             return
-
-        if not exists_long(full):
-            # Likely moved/renamed or too-long path; open parent so user still lands near it.
+        try:
+            if not full.exists():
+                # try long-path check before giving up
+                if not Path(_to_extended_path(full)).exists():
+                    raise FileNotFoundError("Missing or moved")
+            open_file_resilient(full)
+            self.status.set("Opening file…")
+        except Exception:
+            # final fallback: open the parent so user can see/select
             try:
                 open_folder(full.parent)
                 self.status.set("File missing/long-path; opened parent folder")
             except Exception as e2:
-                messagebox.showerror("Open failed", f"Path not found (moved/renamed or long path?):\n{full}\n\n{e2}")
-            return
-
-        try:
-            open_file_resilient(full)
-            self.status.set("Opened")
-        except Exception as e:
-            try:
-                open_folder(full.parent)
-                self.status.set("Opened parent folder (fallback)")
-            except Exception as e2:
-                messagebox.showerror("Open failed", f"{full}\n\n{e}\n\nFallback also failed:\n{e2}")
+                messagebox.showerror("Open failed", f"Couldn't open:\n{full}\n\n{e2}")
 
     def copy_file_path(self):
         sel_job = self.jobs.selection(); sel_file = self.files.selection()
@@ -535,117 +671,86 @@ class App(tk.Tk):
             self.clipboard_clear(); self.clipboard_append(str(full))
             self.status.set("File path copied")
 
+    def reset_all(self):
+        self.q_var.set("")
+        self.years_var.set("2019-2025")
+        self.near_var.set(True)
+        self.compress_var.set(False); self.ame_var.set(False)
+        self.cad_var.set(False); self.pdf_var.set(False)
+        self.limit_var.set(50)
+        self.jobs.delete(*self.jobs.get_children())
+        self.files.delete(*self.files.get_children())
+        self.status.set("RESET")
+
     # ---------- SQL console ----------
     def open_sql_console(self):
-        # Read-only SQL console with resizable editor and a result tab per statement
-        win = tk.Toplevel(self)
-        win.title("TankFinder — Nerd Mode (read-only SQL)")
-        win.geometry("1100x640")
+        win = tk.Toplevel(self); win.title("TankFinder — Nerd Mode (read-only SQL)"); win.geometry("1100x640")
         win.minsize(900, 520)
 
-        # Split the window vertically: editor on top, results (tabs) below
-        split = ttk.Panedwindow(win, orient=tk.VERTICAL)
-        split.pack(fill=tk.BOTH, expand=True, padx=8, pady=8)
+        split = ttk.Panedwindow(win, orient=tk.VERTICAL); split.pack(fill=tk.BOTH, expand=True, padx=8, pady=8)
 
-        # ---- Editor area (top)
-        top = ttk.Frame(split)
-        split.add(top, weight=1)
-
-        # Text editor + vertical scrollbar
+        top = ttk.Frame(split); split.add(top, weight=1)
         txt_scroll = ttk.Scrollbar(top, orient="vertical")
         txt = tk.Text(top, wrap="none", height=14, undo=True)
-        txt.configure(yscrollcommand=txt_scroll.set)
-        txt_scroll.configure(command=txt.yview)
+        txt.configure(yscrollcommand=txt_scroll.set); txt_scroll.configure(command=txt.yview)
+        txt.pack(side=tk.LEFT, fill=tk.BOTH, expand=True); txt_scroll.pack(side=tk.RIGHT, fill=tk.Y)
 
-        txt.pack(side=tk.LEFT, fill=tk.BOTH, expand=True)
-        txt_scroll.pack(side=tk.RIGHT, fill=tk.Y)
-
-        # Seed starter SQL (safe to overwrite)
-        txt.insert(
-            "1.0",
+        txt.insert("1.0",
             "SELECT COUNT(*) AS jobs FROM jobs;\n"
             "SELECT COUNT(*) AS files FROM files WHERE deleted=0;\n"
             "-- Jobs by year:\n"
             "SELECT job_year, COUNT(*) AS jobs FROM jobs GROUP BY job_year ORDER BY job_year;\n"
         )
 
-        # ---- Results area (bottom): a Notebook with one tab per statement
-        res = ttk.Notebook(split)
-        split.add(res, weight=2)
+        res = ttk.Notebook(split); split.add(res, weight=2)
 
         def run_sql():
-            # Clear any prior result tabs
-            for tab_id in list(res.tabs()):
-                res.forget(tab_id)
-
-            raw = txt.get("1.0", "end")
-            statements = [s.strip() for s in raw.split(";") if s.strip()]
-            if not statements:
-                return
-
+            for tab_id in list(res.tabs()): res.forget(tab_id)
+            raw = txt.get("1.0", "end"); statements = [s.strip() for s in raw.split(";") if s.strip()]
+            if not statements: return
             for i, stmt in enumerate(statements, 1):
                 try:
                     cur = self.con.execute(stmt)
-
-                    # If it's not a SELECT (no columns), show a small "OK" note
                     if not cur.description:
-                        frm = ttk.Frame(res)
-                        res.add(frm, text=f"#{i}")
-                        note = tk.Text(frm, height=3)
-                        note.pack(fill=tk.BOTH, expand=True)
-                        note.insert("1.0", "OK")
-                        note.configure(state="disabled")
-                        continue
-
-                    cols = [c[0] for c in cur.description]
-                    rows = cur.fetchall()
-
-                    frm = ttk.Frame(res)
-                    res.add(frm, text=f"#{i}")
-
-                    tv = ttk.Treeview(frm, columns=cols, show="headings")
-                    vs = ttk.Scrollbar(frm, orient="vertical", command=tv.yview)
-                    tv.configure(yscrollcommand=vs.set)
-
-                    tv.pack(side=tk.LEFT, fill=tk.BOTH, expand=True)
-                    vs.pack(side=tk.RIGHT, fill=tk.Y)
-
+                        frm = ttk.Frame(res); res.add(frm, text=f"#{i}")
+                        note = tk.Text(frm, height=3); note.pack(fill=tk.BOTH, expand=True)
+                        note.insert("1.0", "OK"); note.configure(state="disabled"); continue
+                    cols = [c[0] for c in cur.description]; rows = cur.fetchall()
+                    frm = ttk.Frame(res); res.add(frm, text=f"#{i}")
+                    tv = ttk.Treeview(frm, columns=cols, show="headings"); vs = ttk.Scrollbar(frm, orient="vertical", command=tv.yview)
+                    tv.configure(yscrollcommand=vs.set); tv.pack(side=tk.LEFT, fill=tk.BOTH, expand=True); vs.pack(side=tk.RIGHT, fill=tk.Y)
                     for c in cols:
-                        tv.heading(c, text=c)
-                        tv.column(c, width=max(120, int(900 / max(1, len(cols)))), anchor="w")
-
+                        tv.heading(c, text=c); tv.column(c, width=max(120, int(900 / max(1, len(cols)))), anchor="w")
                     for r in rows:
                         tv.insert("", "end", values=[("" if v is None else str(v)) for v in r])
-
                 except Exception as e:
-                    frm = ttk.Frame(res)
-                    res.add(frm, text=f"#{i} (error)")
-                    t = tk.Text(frm, height=6, foreground="red")
-                    t.pack(fill=tk.BOTH, expand=True)
-                    t.insert("1.0", str(e))
-                    t.configure(state="disabled")
+                    frm = ttk.Frame(res); res.add(frm, text=f"#{i} (error)")
+                    t = tk.Text(frm, height=6, foreground="red"); t.pack(fill=tk.BOTH, expand=True)
+                    t.insert("1.0", str(e)); t.configure(state="disabled")
 
-        # Run button + F5 binding
-        btnbar = ttk.Frame(win)
-        btnbar.pack(fill=tk.X, padx=8, pady=(0, 8))
+        btnbar = ttk.Frame(win); btnbar.pack(fill=tk.X, padx=8, pady=(0,8))
         ttk.Button(btnbar, text="Run (F5)", command=run_sql).pack(side=tk.RIGHT)
-
         win.bind("<F5>", lambda _e: run_sql())
 
-   
-    # ---------- Refresh index ----------
+    # ---------- Update database (indexer) ----------
     def refresh_index(self):
         if not INDEXER.exists():
-            messagebox.showerror("TankFinder", f"Indexer not found:\n{INDEXER}")
+            messagebox.showerror("TankFinder", f"Indexer not found:\n{INDEXER}"); return
+
+        if not messagebox.askyesno("UPDATE DATABASE", "You're updating the database outside of its schedule update. This may take a few minutes. Continue?"):
             return
-        full = self.full_refresh_var.get()
-        cmd = [os.fspath(Path(os.sys.executable)), os.fspath(INDEXER)]
-        if not full:
-            cmd += ["--limit", "2000"]
-        self.status.set("Refreshing index…"); self.update_idletasks()
+       
+        # progress popup
+        prog = tk.Toplevel(self); prog.title("Updating…")
+        ttk.Label(prog, text="Running indexer…").pack(padx=12, pady=(12,6))
+        pb = ttk.Progressbar(prog, mode="indeterminate", length=340); pb.pack(padx=12, pady=(0,12)); pb.start(20)
+        prog.geometry("+%d+%d" % (self.winfo_rootx()+120, self.winfo_rooty()+120))
+        prog.transient(self); prog.grab_set()
 
         def runner():
             try:
+                cmd = [os.fspath(Path(os.sys.executable)), os.fspath(INDEXER)]
+                # quick pass: keep as-is (you can extend with flags later)
                 proc = subprocess.Popen(cmd, cwd=os.fspath(ROOT), stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True)
                 last_line = ""
                 while True:
@@ -654,17 +759,22 @@ class App(tk.Tk):
                         if proc.poll() is not None: break
                         time.sleep(0.1); continue
                     last_line = line.strip()
-                    self.status.set(last_line if len(last_line) < 140 else last_line[:140] + "…")
+                    self.status.set(fmt_status(last_line))
                 code = proc.wait()
                 if code == 0:
-                    self.status.set("Index refresh complete" + (" (full)" if full else ""))
+                    self.status.set("Index refresh complete")
                 else:
                     self.status.set(f"Index refresh exited with code {code}")
             except Exception as e:
                 self.status.set(f"Index refresh failed: {e}")
+            finally:
+                try:
+                    pb.stop(); prog.grab_release(); prog.destroy()
+                except Exception:
+                    pass
 
         threading.Thread(target=runner, daemon=True).start()
 
+# ---------- main ----------
 if __name__ == "__main__":
-    app = App()
-    app.mainloop()
+    App().mainloop()

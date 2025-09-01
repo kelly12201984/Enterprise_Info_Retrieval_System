@@ -1,59 +1,27 @@
-# ===== Python =====
+# Python env & cache
 __pycache__/
 *.pyc
 *.pyo
-*.pyd
-.pytest_cache/
-.mypy_cache/
-.ruff_cache/
-.tox/
-.nox/
-.coverage
-htmlcov/
-.ipynb_checkpoints/
-
-# Local virtual envs
 .venv/
 venv/
 .env
 .env.*
-.envrc
 
-# ===== Build/distribution =====
-build/
-dist/
-*.egg-info/
-
-# ===== Editors/OS =====
+# Editor/OS
 .vscode/
-.idea/
-*.code-workspace
 .DS_Store
 Thumbs.db
-Desktop.ini
 
-# ===== Project secrets/config =====
-config.yaml           # keep config.sample.yaml in repo
+# Build & runtime artifacts
+build/
+dist/
+logs/
+software/
+SQL_results/
+previous_scripts/
 
-# ===== SQLite DB & journals =====
-tankfinder.db*
+# Binaries & DBs
+*.exe
 *.db
 *.db-shm
 *.db-wal
-*.sqlite
-*.sqlite3
-
-# ===== Logs & generated outputs =====
-logs/
-*.log
-SQL_results/          # your saved query outputs
-previous_scripts/     # you asked to ignore this folder
-
-# ===== Temp/backup noise =====
-*.tmp
-*.bak
-*.old
-*.orig
-*.swp
-*.swo
-~$*
