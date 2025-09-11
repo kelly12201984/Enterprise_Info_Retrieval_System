@@ -1,54 +1,138 @@
-#!/usr/bin/env python3
-# TankFinder GUI (Tkinter)
-# - Caps headers
-# - FILES column renamed to "KEYWORD FILES"
-# - Center most columns; JOB/QUOTE ID stays left
-# - Status line centered, bigger, and used for progress/errors
-# - "UPDATE DATABASE" button with confirm + progress pulse
-# - "RESET" button to clear search + results
-# - Better long-path file opening and UNC handling
-# - NEAR fallback stays (shows a clear status)
 import tkinter as tk
 from tkinter import ttk, messagebox
-import os, re, sqlite3, subprocess, threading, time, json, sys
+import os, re, sqlite3, subprocess, threading, time, json, sys, urllib.parse
 from pathlib import Path
 
-# ---------- location/DB resolution ----------
+# ------------------ DB path + single-instance ------------------
+
+# Prefer one true UNC path; allow env override if it points to a real file.
+_ONE_TRUE_DB_DEFAULT: Path = Path(r"\\dc1\Company\Software\TankFinder\tankfinder.db")
+
 def app_root() -> Path:
-    if getattr(sys, "frozen", False):  # running as EXE
-        return Path(sys.executable).resolve().parent
-    return Path(__file__).resolve().parents[1]
+    # Folder of the EXE when frozen; otherwise repo root (…/app/ -> parent)
+    return Path(sys.executable).resolve().parent if getattr(sys, "frozen", False) \
+           else Path(__file__).resolve().parents[1]
 
 def resolve_db_path() -> Path:
-    base = app_root()
-    candidates = [
-        base / "tankfinder.db",        # next to EXE (preferred)
-        base.parent / "tankfinder.db", # parent of EXE (when left in /dist)
-    ]
-
     env_db = os.getenv("TANKFINDER_DB")
     if env_db:
         p = Path(env_db)
         if p.is_file():
             return p
 
+    if _ONE_TRUE_DB_DEFAULT.is_file():
+        return _ONE_TRUE_DB_DEFAULT
+
+    # Fallbacks: next to the EXE or its parent (dev/dist layouts)
+    for cand in (app_root() / "tankfinder.db", app_root().parent / "tankfinder.db"):
+        if cand.is_file():
+            return cand
+
+    # Last resort: return default (GUI will surface a clear error later)
+    return _ONE_TRUE_DB_DEFAULT
+
+DB_PATH: Path = resolve_db_path()  # single source of truth for GUI
+
+def connect_db_ro(db_path: Path | str | None = None) -> sqlite3.Connection:
+    """
+    GUI-only: open SQLite in read-only + shared-cache so it never takes a writer lock.
+    Still standard sqlite3 — we just use a URI to set mode=ro.
+    """
+    p = str(db_path or DB_PATH)  # accept Path or str
+    uri = "file:" + urllib.parse.quote(p, safe="/:\\") + "?mode=ro&cache=shared"
+    con = sqlite3.connect(uri, uri=True, timeout=30, isolation_level=None)
+    con.execute("PRAGMA query_only=ON;")
+    con.execute("PRAGMA busy_timeout=8000;")  # brief retry if indexer is mid-commit
+    return con
+
+# If any GUI code calls connect_db(...), force it to use the RO connector.
+connect_db = connect_db_ro
+
+# ---- Single-instance guard (Windows named mutex) ----
+# ---- Single-instance guard (Windows named mutex, session-local) ----
+def enforce_single_instance(name: str = r"Local\SavTank_TankFinder_GUI") -> None:
+    """
+    Prevents two TankFinder GUIs on *this* machine/session.
+    Uses a Local\ mutex (not Global\) to avoid cross-machine / privilege weirdness.
+    Set env TANKFINDER_ALLOW_MULTI=1 to bypass (debug only).
+    """
+    import os, sys, ctypes, ctypes.wintypes as wt, atexit
+
+    if os.environ.get("TANKFINDER_ALLOW_MULTI") == "1":
+        return  # explicit override for debugging
+
+    kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)
+    CreateMutexW = kernel32.CreateMutexW
+    CloseHandle  = kernel32.CloseHandle
+    CreateMutexW.argtypes = (wt.LPVOID, wt.BOOL, wt.LPCWSTR)
+    CreateMutexW.restype  = wt.HANDLE
+
+    handle = CreateMutexW(None, False, name)
+    err = ctypes.get_last_error()
+    if not handle:
+        # couldn't create; don't block startup, just continue
+        return
+
+    # Close the handle on exit so we don't leak
+    try:
+        atexit.register(lambda: CloseHandle(handle))
+    except Exception:
+        pass
+
+    # 183 == ERROR_ALREADY_EXISTS -> another instance of *this* app in this session
+    if err == 183:
+        try:
+            from tkinter import messagebox
+            messagebox.showinfo("TankFinder", "TankFinder is already running.")
+        except Exception:
+            pass
+        sys.exit(0)
+
+
+# Runtime roots used elsewhere (keeps Pylance happy; works in dev and exe)
+ROOT: Path = app_root()
+
+def resolve_indexer() -> Path:
+    r"""
+    Find the indexer in common layouts:
+      - <ROOT>\indexer\indexer.exe  (packaged)
+      - <ROOT>\indexer\indexer.py   (dev)
+      - <ROOT>\..\indexer\indexer.exe/.py (when GUI lives in app/)
+      - explicit dev path as last resort
+    """
+    candidates = [
+        ROOT / "indexer" / "indexer.exe",
+        ROOT / "indexer" / "indexer.py",
+        ROOT.parent / "indexer" / "indexer.exe",
+        ROOT.parent / "indexer" / "indexer.py",
+        Path(r"P:\Chris\TankFinder\indexer\indexer.py"),  # fallback for your dev machine
+    ]
     for c in candidates:
-        if c.is_file():
-            return c
+        try:
+            if c.exists():
+                return c
+        except Exception:
+            pass
+    return candidates[-1]
 
-    # fall back to the preferred location for a clear error later
-    return candidates[0]
+INDEXER: Path = resolve_indexer()
 
-ROOT    = app_root()
-DB_PATH = resolve_db_path()
-INDEXER = ROOT / "indexer" / "indexer.py"
+# Optional: GUI can check if the indexer is active and avoid querying during a refresh.
+INDEXER_LOCK: Path = Path(str(DB_PATH) + ".indexer.lock")
+def index_refreshing() -> bool:
+    try:
+        return INDEXER_LOCK.exists()
+    except Exception:
+        return False
 
-# ---------- helpers ----------
+# ------------------ helpers ------------------
+
 _NON_ALNUM = re.compile(r"[^a-z0-9]+")
 
 def build_match_expr(q: str, use_near: bool) -> str:
     toks = [t for t in re.split(r"\W+", (q or "").lower()) if t]
-    if not toks: return ""
+    if not toks:
+        return ""
     if use_near and len(toks) >= 2:
         expr = f"\"{toks[0]}\""
         for t in toks[1:]:
@@ -57,7 +141,8 @@ def build_match_expr(q: str, use_near: bool) -> str:
     return " AND ".join(f"\"{t}\"" for t in toks)
 
 def year_filters(years: str | None):
-    if not years: return []
+    if not years:
+        return []
     parts = []
     for chunk in years.split(","):
         c = chunk.strip()
@@ -65,7 +150,7 @@ def year_filters(years: str | None):
             a, b = c.split("-", 1)
             try:
                 a = int(a); b = int(b)
-                for y in range(min(a,b), max(a,b)+1):
+                for y in range(min(a, b), max(a, b) + 1):
                     parts.append(str(y))
             except Exception:
                 pass
@@ -73,56 +158,75 @@ def year_filters(years: str | None):
             parts.append(c)
     return [f"j.root_path LIKE '%\\{y}\\%'" for y in sorted(set(parts))]
 
-def _to_extended_path(p: Path) -> str:
-    """Return a Windows extended-length path for long paths."""
+# ---- robust path + open helpers (long/UNC safe) ----
+def _norm(p: Path) -> Path:
+    return Path(os.path.normpath(str(p)))
+
+def _ext_path(p: Path) -> str:
+    r"""Extended-length path for long or UNC paths (\\?\ or \\?\UNC\...)."""
     s = str(p)
+    if s.startswith("\\\\?\\"):
+        return s
     if s.startswith("\\\\"):
-        # UNC -> \\?\UNC\server\share\...
         return "\\\\?\\UNC\\" + s.lstrip("\\")
     return "\\\\?\\" + s
 
+def _to_extended_path(p: Path) -> str:
+    return _ext_path(p)
+
+def _exists_any(p: Path) -> bool:
+    try:
+        if p.exists():
+            return True
+    except Exception:
+        pass
+    try:
+        return Path(_ext_path(p)).exists()
+    except Exception:
+        return False
+
 def open_file_resilient(path: Path) -> None:
-    """Try multiple ways to open a file, including long paths and a final Explorer select."""
-    p = str(path)
-    # 1) normal
+    p = _norm(path)
     try:
-        os.startfile(p)  # type: ignore[attr-defined]
-        return
-    except Exception:
-        pass
-    # 2) extended long-path
-    try:
-        os.startfile(_to_extended_path(path))  # type: ignore[attr-defined]
-        return
-    except Exception:
-        pass
-    # 3) PowerShell Start-Process (sometimes helps with associations)
-    try:
+        is_long_or_unc = len(str(p)) >= 248 or str(p).startswith("\\\\")
+        lit = _ext_path(p) if is_long_or_unc else str(p)
+        lit_escaped = lit.replace("'", "''")
         subprocess.run(
-            ["powershell", "-NoProfile", "-Command", f"Start-Process -FilePath '{p}'"],
-            check=False, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL
+            ["powershell", "-NoProfile", "-Command", f"Invoke-Item -LiteralPath '{lit_escaped}'"],
+            check=True, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL
         )
         return
     except Exception:
         pass
-    # 4) Explorer select as last resort
     try:
-        subprocess.run(f'explorer /select,"{p}"', shell=True)
+        os.startfile(str(p))  # type: ignore[attr-defined]
+        return
+    except Exception:
+        pass
+    try:
+        subprocess.run(["explorer", str(_norm(p.parent))], check=False)
     except Exception as e:
         raise RuntimeError(str(e))
 
 def open_folder(path: Path) -> None:
     try:
-        os.startfile(str(path))  # type: ignore[attr-defined]
+        target = _ext_path(_norm(path)) if str(path).startswith("\\\\") else str(_norm(path))
+        subprocess.run(["explorer", target], check=False)
     except Exception as e:
         raise RuntimeError(str(e))
 
 def fmt_status(s: str) -> str:
     return s.replace("\n", " ")[:200]
 
-# ---------- main app ----------
-# ---------- app ----------
+# ------------------ main app ------------------
+
+if __name__ == "__main__":
+    enforce_single_instance()
+    # ... then build your Tk app
+
 class App(tk.Tk):
+    ...
+
     def __init__(self):
         super().__init__()
         self.title("TankFinder")
@@ -131,8 +235,8 @@ class App(tk.Tk):
             # styles
         s = ttk.Style(self)
         s.configure("Treeview.Heading", font=("Segoe UI", 10, "bold"))
-
-            # ---- top bar (query) ----
+    
+        # ---- top bar (query) ----
         top = ttk.Frame(self, padding=8)
         top.pack(side=tk.TOP, fill=tk.X)
 
@@ -242,7 +346,7 @@ class App(tk.Tk):
         self.file_filter_var = tk.StringVar(value="All")
         self.file_filter = ttk.Combobox(
             header, textvariable=self.file_filter_var, width=12,
-            values=["All","PDFs","CAD","COMPRESS","AME","Text"], state="readonly"
+            values=["All","PDFs","CAD","COMPRESS","AME","EXCEL"], state="readonly"
         )
         self.file_filter.pack(side=tk.LEFT, padx=(4, 0))
         self.file_filter.bind("<<ComboboxSelected>>", lambda e: self.refresh_file_list())
@@ -272,8 +376,7 @@ class App(tk.Tk):
 
         panes.add(right, weight=1)
 
-
-            # ---- bottom bar (status + actions) ----
+        # ---- bottom bar (status + actions) ----
         bottom = ttk.Frame(self, padding=(8, 6))
         bottom.pack(side=tk.BOTTOM, fill=tk.X)
 
@@ -282,8 +385,8 @@ class App(tk.Tk):
         bottom.grid_columnconfigure(1, weight=1)   # status expands
         bottom.grid_columnconfigure(2, weight=0)   # right controls
 
-        # LEFT: NERD MODE (anchor hard-left, under OPEN JOB FOLDER visually)
-        ttk.Button(bottom, text="NERD MODE", command=self.open_sql_console)\
+        # LEFT: NERD MODE (anchor hard-left)
+        ttk.Button(bottom, text="NERD MODE", command=self.open_sql_console) \
         .grid(row=0, column=0, sticky="w")
 
         # CENTER: centered status (bold)
@@ -293,11 +396,23 @@ class App(tk.Tk):
         self.status_label.configure(font=("Segoe UI", 14, "bold"))
         self.status_label.grid(row=0, column=1, sticky="ew", padx=8)
 
-        # RIGHT: CLEAR RESULTS + UPDATE DATABASE
+        # RIGHT: actions (CLEAR RESULTS, UPDATE DATABASE, UPDATE APP)
         right = ttk.Frame(bottom)
         right.grid(row=0, column=2, sticky="e")
-        ttk.Button(right, text="CLEAR RESULTS", command=self.clear_search).pack(side=tk.LEFT, padx=(0,8))
-        ttk.Button(right, text="UPDATE DATABASE", command=self.refresh_index).pack(side=tk.LEFT)
+
+        ttk.Button(right, text="CLEAR RESULTS", command=self.clear_search) \
+        .pack(side=tk.LEFT, padx=(0, 8))
+
+        ttk.Button(right, text="UPDATE DATABASE", command=self.refresh_index) \
+        .pack(side=tk.LEFT, padx=(0, 8))
+
+        # Friendly label for the build step
+        btn_update = ttk.Button(right, text="UPDATE APP", command=self.run_build_exe)
+        btn_update.pack(side=tk.LEFT)
+
+        # subtle status hint on hover
+        btn_update.bind("<Enter>", lambda _e: self.status.set("Build & install the latest app to P:\\Software\\TankFinder"))
+        btn_update.bind("<Leave>", lambda _e: self.status.set("READY"))
 
         # keybinds
         self.bind("<Escape>", lambda _e: self.clear_search())
@@ -358,6 +473,70 @@ class App(tk.Tk):
 
 
     # ---------------- helpers / actions ----------------
+    #Ask to run the build.exe (update the UI for users)
+    def _find_build_script(self) -> Path | None:
+        #Try to locate build_exe.cmd near the app.
+        here = Path(__file__).resolve().parent
+        candidates = [
+            here / "build_exe.cmd",           # same folder as TankFinderGUI.py
+            here.parent / "build_exe.cmd",    # parent (repo root)
+            ROOT / "app" / "build_exe.cmd",   # if ROOT points one level up from /app
+            ROOT / "build_exe.cmd",
+            Path(r"P:\Software\TankFinder\build_exe.cmd"),   # optional: a known location
+        ]
+        for c in candidates:
+            try:
+                if c.exists():
+                    return c
+            except Exception:
+                pass
+        return None
+
+    def run_build_exe(self):
+        """Kick off build_exe.cmd asynchronously with a simple progress popup."""
+        script = self._find_build_script()
+        if not script:
+            messagebox.showerror("Build EXE", "Couldn't find build_exe.cmd.\nPut it next to TankFinderGUI.py.")
+            return
+
+        # progress popup
+        win = tk.Toplevel(self)
+        win.title("Building EXE…")
+        ttk.Label(win, text=f"Running: {script}").pack(padx=12, pady=(12,6))
+        pb = ttk.Progressbar(win, mode="indeterminate", length=360); pb.pack(padx=12, pady=(0,12)); pb.start(18)
+        win.transient(self); win.grab_set()
+        win.geometry("+%d+%d" % (self.winfo_rootx()+180, self.winfo_rooty()+180))
+
+        def _run():
+            try:
+                # Use cmd to run the .cmd; cwd=script.parent so relative paths inside batch work
+                proc = subprocess.Popen(["cmd", "/c", str(script)], cwd=str(script.parent))
+                code = proc.wait()
+                status = "Build complete" if code == 0 else f"Build exited with code {code}"
+            except Exception as e:
+                status = f"Build failed: {e}"
+            finally:
+                def _close():
+                    try:
+                        pb.stop(); win.grab_release(); win.destroy()
+                    except Exception:
+                        pass
+                    self.set_status(status, transient_ms=4000)
+                self.after(0, _close)
+
+            threading.Thread(target=_run, daemon=True).start()
+
+    def on_close(self):
+        #Ask to build on exit; yes=build then quit; no=just quit; cancel=stay.
+        ans = messagebox.askyesnocancel("TankFinder", "Close TankFinder?\n\nBuild a new EXE now?")
+        if ans is None:
+            return  # cancel
+        if ans:
+            # Start build and still close the app; or comment next line if you prefer to keep UI open
+            self.after(100, self.destroy)
+            self.after(150, self.run_build_exe)
+        else:
+            self.destroy()
     def set_status(self, msg: str, *, transient_ms: int | None = None):
         if hasattr(self, "status_var"):
             self.status_var.set(msg)
@@ -581,6 +760,7 @@ class App(tk.Tk):
         if choice == "COMPRESS":  return "(instr(f.detector_hits,'compress')>0 OR f.ext IN('.cw7','.xml','.out','.lst','.txt','.html','.htm'))"
         if choice == "AME":       return "(instr(f.detector_hits,'ametank')>0 OR f.ext IN('.mdl','.xmt_txt','.txt','.html','.htm'))"
         if choice == "Text":      return "f.ext IN('.txt','.xml','.html','.htm','.xmt_txt','.csv')"
+        if choice == "EXCEL":     return "f.ext IN('.xls','.xlsx','.csv')"
         return "1=1"
 
     def on_job_select(self, *_):
