@@ -86,6 +86,21 @@ def resolve_db_path(cfg: dict) -> Path:
         return Path(cfg_db)
     return DEFAULT_DB
 
+def acquire_lock(lock_path: Path) -> None:
+    try:
+        # O_EXCL create — fails if it already exists
+        fd = os.open(lock_path, os.O_CREAT | os.O_EXCL | os.O_WRONLY)
+        with os.fdopen(fd, "w") as f:
+            f.write(str(os.getpid()))
+    except FileExistsError:
+        raise SystemExit(f"[indexer] Another scan appears to be running (lock: {lock_path})")
+
+def release_lock(lock_path: Path) -> None:
+    try:
+        lock_path.unlink(missing_ok=True)  # Python 3.8+: ignore if missing
+    except Exception:
+        pass
+
 # -------- Quote / Year patterns --------
 # e.g., Q9185, Q9185.2 — with word boundaries so we don't match part of another token
 QNUM_RE     = re.compile(r"(?i)(?<!\w)q(?P<num>\d{4,6})(?:\.(?P<ver>\d+))?(?!\w)")
@@ -110,13 +125,49 @@ def load_cfg() -> dict:
     with open(CFG_PATH, "r", encoding="utf-8") as f:
         return yaml.safe_load(f) or {}
 
-def connect_db(db_path: Path) -> sqlite3.Connection:
-    con = sqlite3.connect(db_path)
-    con.execute("PRAGMA journal_mode=WAL;")
-    con.execute("PRAGMA synchronous=NORMAL;")
-    con.execute("PRAGMA temp_store=MEMORY;")
-    con.execute("PRAGMA foreign_keys=ON;")
+def connect_db(db_path: str | os.PathLike) -> sqlite3.Connection:
+    # generous busy timeouts so we wait for short-lived readers/writers
+    con = sqlite3.connect(
+        str(db_path),
+        timeout=60.0,            # wait up to 60s for file locks
+        isolation_level=None,    # autocommit; we'll manage transactions explicitly
+        detect_types=sqlite3.PARSE_DECLTYPES
+    )
+    # Busy timeout, too (covers some drivers)
+    try:
+        con.execute("PRAGMA busy_timeout=60000;")
+    except Exception:
+        pass
+
+    # If it's already WAL, don't try to change it (avoids exclusive lock need)
+    try:
+        mode = con.execute("PRAGMA journal_mode;").fetchone()[0]
+    except Exception:
+        mode = None
+
+    if not mode or str(mode).lower() != "wal":
+        # Try to switch to WAL, but don't crash if someone else has a lock.
+        for _ in range(6):  # try for ~6 * 2s = 12s
+            try:
+                got = con.execute("PRAGMA journal_mode=WAL;").fetchone()[0]
+                break
+            except sqlite3.OperationalError:
+                time.sleep(2)
+        # If it still fails, just proceed — SQLite will keep current mode
+
+    # Reasonable durability/perf knobs
+    for pragma in (
+        "PRAGMA synchronous=NORMAL;",
+        "PRAGMA temp_store=MEMORY;",
+        "PRAGMA mmap_size=30000000000;",  # ok if it no-ops on some systems
+    ):
+        try:
+            con.execute(pragma)
+        except Exception:
+            pass
+
     return con
+
 
 
 def ensure_schema(con: sqlite3.Connection, rebuild_fts: bool = False) -> None:
