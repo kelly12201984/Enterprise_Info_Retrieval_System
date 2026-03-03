@@ -261,7 +261,7 @@ class App(tk.Tk):
 
         # YEARS
         ttk.Label(top, text="YEARS:").grid(row=0, column=5, sticky="e", padx=(12,4))
-        self.years_var = tk.StringVar(value="2019-2025")
+        self.years_var = tk.StringVar(value=f"2019-{time.localtime().tm_year}")
         ttk.Entry(top, textvariable=self.years_var, width=16).grid(row=0, column=6, sticky="w")
 
         # quick badges
@@ -270,7 +270,7 @@ class App(tk.Tk):
         self.cad_var      = tk.BooleanVar(value=False)
         self.pdf_var      = tk.BooleanVar(value=False)
         ttk.Checkbutton(top, text="COMPRESS", variable=self.compress_var).grid(row=0, column=7, padx=(12,0))
-        ttk.Checkbutton(top, text="AME",      variable=self.ame_var).grid(row=0, column=8)
+        ttk.Checkbutton(top, text="API",      variable=self.ame_var).grid(row=0, column=8)
         ttk.Checkbutton(top, text="CAD",      variable=self.cad_var).grid(row=0, column=9)
         ttk.Checkbutton(top, text="PDF",      variable=self.pdf_var).grid(row=0, column=10)
 
@@ -297,7 +297,7 @@ class App(tk.Tk):
         self.job_cols = ("job_id","hits","pdfs","cad","compress","ame","badges","root_path")
         headings = {
             "job_id":"JOB/QUOTE ID", "hits":"HITS",
-            "pdfs":"#PDF", "cad":"#CAD", "compress":"#COMPRESS", "ame":"#AME",
+            "pdfs":"#PDF", "cad":"#CAD", "compress":"#COMPRESS", "ame":"#API",
             "badges":"BADGES", "root_path":"FOLDER LOCATION"
         }
 
@@ -346,7 +346,7 @@ class App(tk.Tk):
         self.file_filter_var = tk.StringVar(value="All")
         self.file_filter = ttk.Combobox(
             header, textvariable=self.file_filter_var, width=12,
-            values=["All","PDFs","CAD","COMPRESS","AME","EXCEL"], state="readonly"
+            values=["All","PDFs","CAD","COMPRESS","API","EXCEL"], state="readonly"
         )
         self.file_filter.pack(side=tk.LEFT, padx=(4, 0))
         self.file_filter.bind("<<ComboboxSelected>>", lambda e: self.refresh_file_list())
@@ -396,7 +396,7 @@ class App(tk.Tk):
         self.status_label.configure(font=("Segoe UI", 14, "bold"))
         self.status_label.grid(row=0, column=1, sticky="ew", padx=8)
 
-        # RIGHT: actions (CLEAR RESULTS, UPDATE DATABASE, UPDATE APP)
+        # RIGHT: actions (CLEAR RESULTS, UPDATE DATABASE)
         right = ttk.Frame(bottom)
         right.grid(row=0, column=2, sticky="e")
 
@@ -404,15 +404,7 @@ class App(tk.Tk):
         .pack(side=tk.LEFT, padx=(0, 8))
 
         ttk.Button(right, text="UPDATE DATABASE", command=self.refresh_index) \
-        .pack(side=tk.LEFT, padx=(0, 8))
-
-        # Friendly label for the build step
-        btn_update = ttk.Button(right, text="UPDATE APP", command=self.run_build_exe)
-        btn_update.pack(side=tk.LEFT)
-
-        # subtle status hint on hover
-        btn_update.bind("<Enter>", lambda _e: self.status.set("Build & install the latest app to P:\\Software\\TankFinder"))
-        btn_update.bind("<Leave>", lambda _e: self.status.set("READY"))
+        .pack(side=tk.LEFT)
 
         # keybinds
         self.bind("<Escape>", lambda _e: self.clear_search())
@@ -473,70 +465,6 @@ class App(tk.Tk):
 
 
     # ---------------- helpers / actions ----------------
-    #Ask to run the build.exe (update the UI for users)
-    def _find_build_script(self) -> Path | None:
-        #Try to locate build_exe.cmd near the app.
-        here = Path(__file__).resolve().parent
-        candidates = [
-            here / "build_exe.cmd",           # same folder as TankFinderGUI.py
-            here.parent / "build_exe.cmd",    # parent (repo root)
-            ROOT / "app" / "build_exe.cmd",   # if ROOT points one level up from /app
-            ROOT / "build_exe.cmd",
-            Path(r"P:\Software\TankFinder\build_exe.cmd"),   # optional: a known location
-        ]
-        for c in candidates:
-            try:
-                if c.exists():
-                    return c
-            except Exception:
-                pass
-        return None
-
-    def run_build_exe(self):
-        """Kick off build_exe.cmd asynchronously with a simple progress popup."""
-        script = self._find_build_script()
-        if not script:
-            messagebox.showerror("Build EXE", "Couldn't find build_exe.cmd.\nPut it next to TankFinderGUI.py.")
-            return
-
-        # progress popup
-        win = tk.Toplevel(self)
-        win.title("Building EXE…")
-        ttk.Label(win, text=f"Running: {script}").pack(padx=12, pady=(12,6))
-        pb = ttk.Progressbar(win, mode="indeterminate", length=360); pb.pack(padx=12, pady=(0,12)); pb.start(18)
-        win.transient(self); win.grab_set()
-        win.geometry("+%d+%d" % (self.winfo_rootx()+180, self.winfo_rooty()+180))
-
-        def _run():
-            try:
-                # Use cmd to run the .cmd; cwd=script.parent so relative paths inside batch work
-                proc = subprocess.Popen(["cmd", "/c", str(script)], cwd=str(script.parent))
-                code = proc.wait()
-                status = "Build complete" if code == 0 else f"Build exited with code {code}"
-            except Exception as e:
-                status = f"Build failed: {e}"
-            finally:
-                def _close():
-                    try:
-                        pb.stop(); win.grab_release(); win.destroy()
-                    except Exception:
-                        pass
-                    self.set_status(status, transient_ms=4000)
-                self.after(0, _close)
-
-            threading.Thread(target=_run, daemon=True).start()
-
-    def on_close(self):
-        #Ask to build on exit; yes=build then quit; no=just quit; cancel=stay.
-        ans = messagebox.askyesnocancel("TankFinder", "Close TankFinder?\n\nBuild a new EXE now?")
-        if ans is None:
-            return  # cancel
-        if ans:
-            # Start build and still close the app; or comment next line if you prefer to keep UI open
-            self.after(100, self.destroy)
-            self.after(150, self.run_build_exe)
-        else:
-            self.destroy()
     def set_status(self, msg: str, *, transient_ms: int | None = None):
         if hasattr(self, "status_var"):
             self.status_var.set(msg)
@@ -574,38 +502,6 @@ class App(tk.Tk):
         # focus & status
         if hasattr(self, "q_entry"): self.q_entry.focus_set()
         self.set_status("Cleared. Ready.", transient_ms=1600)
-
-        # ---- DB open (robust) ----
-        dbp = DB_PATH
-
-        if not dbp.exists():
-            messagebox.showerror("TankFinder", f"Database not found:\n{dbp}")
-            self.destroy(); return
-
-        def _uri(p: Path) -> str:
-            # SQLite likes forward slashes in file: URIs
-            return "file:" + p.resolve().as_posix() + "?mode=ro"
-
-        try:
-            # Prefer strict read-only via URI
-            self.con = sqlite3.connect(_uri(dbp), uri=True)
-        except Exception:
-            # Fallback to plain path (helps on some Windows setups)
-            try:
-                self.con = sqlite3.connect(str(dbp))
-            except Exception as e:
-                messagebox.showerror("TankFinder", f"Couldn't open database:\n{dbp}\n\n{e}")
-                self.destroy(); return
-
-        # Belt-and-suspenders: keep connection query-only
-        try:
-            self.con.execute("PRAGMA query_only=ON;")
-        except Exception:
-            pass
-
-        self.con.row_factory = sqlite3.Row
-        # Optional: show where we're connected
-        # self.status.set(f"DB: {dbp}")
 
 
     # ---------- sorting ----------
@@ -705,7 +601,7 @@ class App(tk.Tk):
         (SELECT COUNT(*) FROM files x WHERE x.job_id=j.job_id AND x.deleted=0 AND (
             instr(x.detector_hits,'compress')>0 OR x.ext IN('.cw7','.xml','.out','.lst','.txt','.html','.htm'))) AS n_compress,
         (SELECT COUNT(*) FROM files x WHERE x.job_id=j.job_id AND x.deleted=0 AND (
-            instr(x.detector_hits,'ametank')>0 OR x.ext IN('.mdl','.xmt_txt','.txt','.html','.htm'))) AS n_ame
+            instr(x.detector_hits,'ametank')>0 OR x.ext IN('.mdl','.xmt_txt','.amz','.txt','.html','.htm'))) AS n_ame
         FROM hits h
         JOIN jobs j ON j.job_id=h.job_id
         GROUP BY j.job_id, j.root_path, j.has_compress, j.has_ame, j.has_dwg_dxf, j.has_pdf
@@ -718,7 +614,7 @@ class App(tk.Tk):
             for r in rows:
                 badges = []
                 if r["has_compress"]: badges.append("COMPRESS")
-                if r["has_ame"]:      badges.append("AME")
+                if r["has_ame"]:      badges.append("API")
                 if r["has_dwg_dxf"]:  badges.append("CAD")
                 if r["has_pdf"]:      badges.append("PDF")
                 # Quote badge if a quote job has at least one PDF
@@ -758,7 +654,7 @@ class App(tk.Tk):
         if choice == "PDFs":      return "f.ext='.pdf'"
         if choice == "CAD":       return "f.ext IN('.dwg','.dxf')"
         if choice == "COMPRESS":  return "(instr(f.detector_hits,'compress')>0 OR f.ext IN('.cw7','.xml','.out','.lst','.txt','.html','.htm'))"
-        if choice == "AME":       return "(instr(f.detector_hits,'ametank')>0 OR f.ext IN('.mdl','.xmt_txt','.txt','.html','.htm'))"
+        if choice == "API":       return "(instr(f.detector_hits,'ametank')>0 OR f.ext IN('.mdl','.xmt_txt','.amz','.txt','.html','.htm'))"
         if choice == "Text":      return "f.ext IN('.txt','.xml','.html','.htm','.xmt_txt','.csv')"
         if choice == "EXCEL":     return "f.ext IN('.xls','.xlsx','.csv')"
         return "1=1"
@@ -853,7 +749,7 @@ class App(tk.Tk):
 
     def reset_all(self):
         self.q_var.set("")
-        self.years_var.set("2019-2025")
+        self.years_var.set(f"2019-{time.localtime().tm_year}")
         self.near_var.set(True)
         self.compress_var.set(False); self.ame_var.set(False)
         self.cad_var.set(False); self.pdf_var.set(False)
