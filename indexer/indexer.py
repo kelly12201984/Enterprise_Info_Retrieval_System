@@ -9,9 +9,9 @@ Key features
 - Always roll up job flags (PDF/CAD/COMPRESS/AME) for jobs seen this run.
 
 CLI
-  py -3 indexer\indexer.py --year-min 2015 --year-max 2025
+  py -3 indexer\indexer.py --year-min 2015 --year-max 2100
   py -3 indexer\indexer.py --quotes-only
-  py -3 indexer\indexer.py --rebuild-fts --year-min 2015 --year-max 2025
+  py -3 indexer\indexer.py --rebuild-fts --year-min 2015 --year-max 2100
 
 Config (config.yaml)
   roots: ["P:\\JOBS", "P:\\ARCHIVES\\OLD JOBS"]
@@ -211,7 +211,7 @@ def ensure_schema(con: sqlite3.Connection, rebuild_fts: bool = False) -> None:
 # ================= detectors =================
 DEFAULT_DETECTORS = {
     "compress":   {"ext_any": {".cw7", ".xml"},                  "name_tokens_any": {"compress","codeware"}},
-    "ametank":    {"ext_any": {".mdl", ".xmt_txt"},              "name_tokens_any": {"ametank","ame"}},
+    "ametank":    {"ext_any": {".mdl", ".xmt_txt", ".amz"},      "name_tokens_any": {"ametank","ame"}},
     "cad":        {"ext_any": {".dwg", ".dxf"}},
     "pdf":        {"ext_any": {".pdf"}},
     "excel":      {"ext_any": {".xlsx",".xlsm",".xls",".csv"}},
@@ -591,7 +591,7 @@ def main():
     ap.add_argument("--dry-run", action="store_true", help="Scan but do not write DB")
     ap.add_argument("--no-delete", action="store_true", help="Skip delete pass (safety)")
     ap.add_argument("--year-min", type=int, default=2015, help="Min JOB year to include (via job_id)")
-    ap.add_argument("--year-max", type=int, default=2025, help="Max JOB year to include (via job_id)")
+    ap.add_argument("--year-max", type=int, default=2100, help="Max JOB year to include (via job_id)")
     ap.add_argument("--rebuild-fts", action="store_true", help="Drop and recreate FTS table")
     ap.add_argument("--quotes-only", action="store_true", help="Scan only quotes_roots (skip JOBS/ARCHIVES)")
     args = ap.parse_args()

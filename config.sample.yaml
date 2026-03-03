@@ -21,7 +21,7 @@ scan_policy:
   only_year_dirs_under_roots: true
   year_dir_regex: "^(19|20)\\d{2}$"   # folders like 2015, 2016, ...
   year_min: 2015
-  year_max: 2025
+  year_max: 2100
 
 # ---- How to detect a job id in JOBS/ARCHIVES paths ----
 job_id_regex: "(?P<job>\\b\\d{3}-\\d{2}\\b)"   # e.g., 101-23
@@ -50,7 +50,7 @@ detectors:
     ext_any: [".cw7", ".xml"]
     name_tokens_any: ["compress", "codeware"]
   ametank:
-    ext_any: [".mdl", ".xmt_txt"]
+    ext_any: [".mdl", ".xmt_txt", ".amz"]
     name_tokens_any: ["ametank", "ame"]
   cad:
     ext_any: [".dwg", ".dxf"]
